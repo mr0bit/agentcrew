@@ -33,6 +33,13 @@ deleting is what this policy exists to prevent.
 
 <!-- Day sections follow. Append today's notes under `## YYYY-MM-DD`. -->
 
+## 2026-10-20
+
+Updated the HTTP API test server fixture to pass `repoPath: tmpDir`, keeping
+`task.create` and `idea.promote` test writes inside the temporary repository.
+Verified the HTTP API and phase-6 functionality suites; checked for generated
+untracked backlog task files.
+
 ## 2026-10-18
 
 Session opened by loading long-term memory, recent short-term memory, and the
@@ -412,3 +419,22 @@ All 103 unit/integration tests pass. Restarted daemon on port 3000.
 
 
 
+
+## 2026-10-20
+
+Backend hardening and Phase 4/5 API work on the current shared AgentCrew worktree:
+project-scoped jobs/sessions and cancellation, command job process limits, scheduler
+pause isolation, session reset/cutoff handling, roster validation, bounded docs
+reads, and project state endpoints for ideas, snippets, tasks, and diagnostics.
+Added HTTP API regressions. Node 24 server tests pass: 54/54. Existing parallel
+frontend and backend edits were preserved; frontend files were not changed here.
+
+Frontend Phase 3–5 follow-up: updated cockpit Kanban stage extraction to recognize
+`tasks-*` columns alongside `col-*`, registered the complete server SSE event list,
+and added a functional-controls regression for clicking a `.task-item` in
+`#tasks-in_progress`. Node 24 targeted test passes (7/7).
+
+Added `test/server/phase6-full-functionality.test.js`, an acceptance suite for
+disposable Git repositories, working/staged diffs, repository context, named job
+execution and cancellation, roster/scheduler/content/preference commands, project
+isolation, diagnostics, and static assets. Node 24 targeted run passes (6/6).

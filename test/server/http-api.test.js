@@ -31,6 +31,7 @@ test('SupervisorServer serves TRD §12 API routes and SSE stream', async (t) => 
     workspace,
     projectId: project.id,
     projectName: 'Server Test Project',
+    repoPath: tmpDir,
     scheduler,
     takeoverController: takeover,
     staticDir: path.join(__dirname, 'fixtures'),
