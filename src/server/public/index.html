@@ -49,10 +49,10 @@
         </div>
       </div>
 
-      <div class="topbar-needs-input-badge" id="topbar-needs-input-badge" title="Filter to agents requiring operator input">
+      <button type="button" class="topbar-needs-input-badge" id="topbar-needs-input-badge" title="Filter to agents requiring operator input" aria-label="Filter to agents requiring operator input">
         <span class="status-dot-red">●</span>
-        <span class="needs-input-text"><strong id="needs-input-count">1</strong> needs input</span>
-      </div>
+        <span class="needs-input-text"><strong id="needs-input-count">0</strong> needs input</span>
+      </button>
     </div>
 
     <!-- Universal View Switcher Tabs (Option A + LIX style) -->
@@ -69,8 +69,9 @@
     <div class="topbar-right">
       <div class="topbar-search-box">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-        <input type="search" placeholder="Search agents, tasks, PRs…" id="topbar-search-input" autocomplete="off">
+        <input type="search" placeholder="Search agents, tasks, PRs…" id="topbar-search-input" autocomplete="off" aria-label="Global search" aria-autocomplete="list" aria-controls="topbar-search-results">
         <kbd>/</kbd>
+        <div id="topbar-search-results" class="search-palette-dropdown" hidden role="listbox" aria-label="Search results"></div>
       </div>
       <button class="topbar-icon-btn" id="topbar-team-btn" title="Toggle Team Sidebar" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg></button>
       <button class="topbar-icon-btn topbar-help-btn" id="topbar-help-btn" title="Help & Docs" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> <span>Help</span></button>
@@ -78,11 +79,11 @@
         <div class="assistant-avatar-sm">🤖</div>
         <span>Assistant</span>
       </button>
-      <div class="topbar-user-profile">
+      <button type="button" class="topbar-user-profile" id="topbar-user-profile" aria-label="Operator Profile and Preferences">
         <div class="topbar-user-avatar">H</div>
-        <span class="topbar-user-name">Human Operator</span>
+        <span class="topbar-user-name" id="topbar-user-name">Human Operator</span>
         <span class="pro-badge">PRO</span>
-      </div>
+      </button>
     </div>
   </header>
 
@@ -595,23 +596,27 @@
                 <!-- Floating Rich Prompt Box (LIX Console Style) -->
                 <div class="agentsroom-composer" id="agentsroom-composer">
                   <div class="composer-header-tools">
-                    <button class="composer-mini-tool" title="Expand Composer" type="button">⤢</button>
-                    <button class="composer-mini-tool" title="Code Editor" type="button">⌸</button>
+                    <button class="composer-mini-tool" id="btn-expand-composer" data-composer-action="expand" title="Expand Composer (Toggle larger editor)" type="button">⤢</button>
+                    <button class="composer-mini-tool" id="btn-code-editor" data-composer-action="code-editor" title="Code Editor (Toggle code mode)" type="button">⌸</button>
                   </div>
+                  <div class="composer-attachments" id="composer-attachments" hidden></div>
                   <textarea id="team-chat-input" class="composer-textarea" placeholder="Ask AgentCrew to code, review, or orchestrate... (Enter to send, Shift+Enter for new line)" rows="2" aria-label="Agent prompt input"></textarea>
                   <div class="composer-toolbar">
                     <div class="composer-tools-left">
-                      <button type="button" class="tool-chip" title="Tools">+ Tools</button>
-                      <button type="button" class="tool-chip" title="Context Selection">+ Context</button>
-                      <button type="button" class="tool-chip" title="Insert Code">&lt;/&gt;</button>
-                      <button type="button" class="tool-chip" title="Docs & Knowledge">📖</button>
+                      <button type="button" class="tool-chip" id="btn-chip-tools" data-composer-action="tools" title="Tools">+ Tools</button>
+                      <button type="button" class="tool-chip" id="btn-chip-context" data-composer-action="context" title="Context Selection">+ Context</button>
+                      <button type="button" class="tool-chip" id="btn-chip-insert-code" data-composer-action="insert-code" title="Insert Code">&lt;/&gt;</button>
+                      <button type="button" class="tool-chip" id="btn-chip-docs" data-composer-action="docs" title="Docs & Knowledge">📖 Docs</button>
                     </div>
                     <div class="composer-tools-right">
                       <div class="voice-controls-pill">
-                        <button type="button" class="voice-btn mic-btn" title="Voice Input"><span class="icon">🎙️</span></button>
+                        <button type="button" class="voice-btn mic-btn" id="btn-voice-mic" data-composer-action="voice" title="Voice Input"><span class="icon">🎙️</span></button>
                       </div>
                       <button type="button" class="composer-send-btn" id="btn-send-chat" title="Send (Enter)" aria-label="Send message">
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                      </button>
+                      <button type="button" class="composer-cancel-btn" id="btn-cancel-chat" title="Cancel prompt" aria-label="Cancel prompt" hidden>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>
                       </button>
                     </div>
                   </div>
@@ -1201,10 +1206,28 @@
     </div>
   </div>
 
+  <!-- Shared Accessible Dialog Modal Host -->
+  <div class="modal-overlay" id="shared-dialog-modal" hidden role="dialog" aria-modal="true" aria-labelledby="shared-dialog-title">
+    <div class="modal-card" id="shared-dialog-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="shared-dialog-title" class="modal-title">Dialog</h2>
+          <p id="shared-dialog-subtitle" class="modal-subtitle" hidden></p>
+        </div>
+        <button class="modal-close-btn" id="btn-close-shared-dialog" type="button" aria-label="Close modal">✕</button>
+      </div>
+      <div class="modal-body" id="shared-dialog-body"></div>
+    </div>
+  </div>
+
+  <!-- Global Accessible Toast Notification Container -->
+  <div id="global-toast-container" class="global-toast-container" aria-live="polite" aria-atomic="true"></div>
+
   <script src="/analytics-dashboard-data.js"></script>
   <script src="/pixel-room.js"></script>
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/addon-fit.js"></script>
   <script src="/app.js"></script>
+  <script src="/cockpit-actions.js"></script>
 </body>
 </html>

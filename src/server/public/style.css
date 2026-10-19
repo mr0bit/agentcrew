@@ -4679,6 +4679,26 @@ body.in-team-room .dashboard-container {
   transform: scale(1.05);
 }
 
+.composer-cancel-btn {
+  background: #ef4444;
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  box-shadow: 0 2px 6px rgba(239, 68, 68, 0.3);
+}
+
+.composer-cancel-btn:hover {
+  background: #dc2626;
+  transform: scale(1.05);
+}
+
 /* Bottom Utility Bar */
 .cockpit-utility-bar {
   height: 38px;
@@ -4847,4 +4867,404 @@ body.in-team-room .dashboard-container {
   color: #f8fafc;
 }
 
+/* Clean Honest Empty State for Cockpit Feed */
+.chat-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 24px;
+  margin: auto;
+  max-width: 480px;
+  color: var(--text-secondary, #94a3b8);
+}
 
+.chat-empty-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+.chat-empty-icon {
+  font-size: 2.5rem;
+  margin-bottom: 12px;
+}
+
+.chat-empty-name {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-primary, #f1f5f9);
+  margin: 0 0 4px 0;
+}
+
+.chat-empty-role {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-muted, #64748b);
+  margin-bottom: 10px;
+}
+
+.chat-empty-provider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-size: 0.75rem;
+}
+
+.chat-empty-provider .provider-pill,
+.chat-empty-provider .status-pill {
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: var(--bg-surface-elevated, #1e293b);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  color: var(--text-secondary, #94a3b8);
+}
+
+.chat-empty-divider {
+  width: 48px;
+  height: 2px;
+  background: var(--border-subtle, rgba(255, 255, 255, 0.08));
+  margin-bottom: 14px;
+  border-radius: 1px;
+}
+
+.chat-empty-hint {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text-muted, #64748b);
+  margin: 0;
+}
+
+.chat-empty-hint strong {
+  color: var(--text-secondary, #94a3b8);
+}
+
+/* Kanban Honest Empty Placeholders and Error States */
+.kanban-empty-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-muted, #64748b);
+  font-size: 0.8rem;
+  border: 1px dashed var(--border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.kanban-error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 12px;
+  text-align: center;
+  color: #f87171;
+  font-size: 0.82rem;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 8px;
+  margin: 8px 0;
+  gap: 8px;
+}
+
+.kanban-error-state button {
+  font-size: 0.75rem;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* Pending Message Indicator & Thinking Dots */
+.chat-msg.pending {
+  opacity: 0.85;
+}
+
+.chat-msg.pending .thinking-dots {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.chat-msg.pending .thinking-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-muted, #64748b);
+  animation: pulse-dot 1.2s infinite ease-in-out;
+}
+
+.chat-msg.pending .thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.chat-msg.pending .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes pulse-dot {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1.1); opacity: 1; }
+}
+
+/* --- Phase 2: Topbar Button Normalizations --- */
+button.topbar-needs-input-badge {
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+button.topbar-user-profile {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 15px;
+  padding: 2px 6px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.topbar-user-profile:hover,
+button.topbar-user-profile:focus-visible {
+  background: #141d2e;
+  border-color: rgba(56, 189, 248, 0.3);
+  outline: none;
+}
+
+/* --- Phase 2: Search Palette Dropdown --- */
+.topbar-search-box {
+  position: relative;
+}
+
+.search-palette-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 340px;
+  max-height: 420px;
+  overflow-y: auto;
+  background: #0d121f;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 12px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65);
+  z-index: 200;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-palette-dropdown[hidden] {
+  display: none !important;
+}
+
+.search-result-group-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #64748b;
+  padding: 6px 8px 2px 8px;
+  letter-spacing: 0.5px;
+}
+
+.search-result-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  color: #e2e8f0;
+  font-size: 12.5px;
+  text-align: left;
+  width: 100%;
+  transition: background 0.1s ease;
+  font-family: inherit;
+}
+
+.search-result-item:hover,
+.search-result-item.selected {
+  background: rgba(2, 132, 199, 0.2);
+  color: #38bdf8;
+}
+
+.search-result-item .result-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result-item .result-meta {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+.search-no-results {
+  padding: 14px;
+  text-align: center;
+  color: #64748b;
+  font-size: 12px;
+}
+
+/* --- Phase 2: Global Toast Notifications --- */
+.global-toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.global-toast-item {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #111625;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: #f8fafc;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  animation: toast-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  max-width: 380px;
+}
+
+.global-toast-item.toast-success {
+  border-color: #22c55e;
+}
+
+.global-toast-item.toast-error {
+  border-color: #ef4444;
+}
+
+.global-toast-item.toast-warning {
+  border-color: #f59e0b;
+}
+
+.global-toast-close {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* --- Phase 2: Generic Modal Body & Card --- */
+.modal-card {
+  width: 100%;
+  max-width: 580px;
+  max-height: 85vh;
+  background: var(--bg-surface, #0d121f);
+  border: 1px solid var(--border-strong, rgba(56, 189, 248, 0.2));
+  border-radius: 16px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text-primary, #f8fafc);
+}
+
+.modal-body {
+  padding: 20px 24px;
+  overflow-y: auto;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+/* --- Phase 2: Composer Tools & Attachments --- */
+.agentsroom-composer.composer-expanded {
+  height: auto;
+}
+
+.agentsroom-composer.composer-expanded .composer-textarea {
+  min-height: 180px;
+  height: 220px;
+}
+
+.composer-textarea.code-mode {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  tab-size: 2;
+  color: #38bdf8;
+  background: rgba(14, 18, 27, 0.85);
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px 0 12px;
+}
+
+.composer-attachments[hidden] {
+  display: none !important;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #182235;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  color: #e2e8f0;
+}
+
+.attachment-chip .chip-remove-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.attachment-chip .chip-remove-btn:hover {
+  color: #ef4444;
+}
+
+.voice-btn.recording {
+  background: rgba(239, 68, 68, 0.2) !important;
+  color: #ef4444 !important;
+  border-color: #ef4444 !important;
+  animation: pulse-mic 1s infinite alternate;
+}
+
+@keyframes pulse-mic {
+  from { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  to { transform: scale(1.1); box-shadow: 0 0 10px 4px rgba(239, 68, 68, 0.4); }
+}
+
+.agent-roster-panel.collapsed {
+  display: none !important;
+}

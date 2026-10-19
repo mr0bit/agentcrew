@@ -43,8 +43,27 @@ document.addEventListener('DOMContentLoaded', () => {
   const panelChatView = document.getElementById('panel-chat-view');
   let liveAgents = [];
   let selectedAgentName = '';
+  let inFlightAgentName = '';
   let activeAgentFilter = 'all';
   let aiOrb = null;
+  window.agentCrewOrb = null;
+  let currentProjectId = '';
+  let isPromptInFlight = false;
+  let promptAbortController = null;
+  const renderedMessageIds = new Set();
+  let feedRequestSeq = 0;
+  let cachedTasks = [];
+  let pendingIndicatorEl = null;
+
+  function escapeHtml(text) {
+    if (text == null) return '';
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
 
   function formatToolChatText(text) {
     if (!text) return '';
@@ -55,92 +74,254 @@ document.addEventListener('DOMContentLoaded', () => {
       const trimmed = line.trim();
       if (trimmed.startsWith('●') || trimmed.startsWith('Tool:') || trimmed.startsWith('Edit(') || trimmed.startsWith('Write(')) {
         if (inTool) html += '</div>';
-        html += `<div class="tool-call-card"><div class="tool-call-header"><span class="tool-dot">●</span> <strong>${trimmed.replace(/^[●\s]+/, '')}</strong></div>`;
+        const cleanHeader = escapeHtml(trimmed.replace(/^[●\s]+/, ''));
+        html += `<div class="tool-call-card"><div class="tool-call-header"><span class="tool-dot">●</span> <strong>${cleanHeader}</strong></div>`;
         inTool = true;
       } else if (inTool && trimmed.startsWith('└')) {
-        html += `<div class="tool-call-body">${trimmed}</div></div>`;
+        const cleanBody = escapeHtml(trimmed);
+        html += `<div class="tool-call-body">${cleanBody}</div></div>`;
         inTool = false;
       } else if (trimmed.startsWith('└ done') || trimmed.includes('tok/s')) {
         if (inTool) { html += '</div>'; inTool = false; }
-        html += `<div class="tool-metrics">${trimmed}</div>`;
+        const cleanMetrics = escapeHtml(trimmed);
+        html += `<div class="tool-metrics">${cleanMetrics}</div>`;
       } else {
         if (inTool) { html += '</div>'; inTool = false; }
-        if (trimmed) html += `<div class="chat-paragraph">${trimmed}</div>`;
+        if (trimmed) html += `<div class="chat-paragraph">${escapeHtml(trimmed)}</div>`;
       }
     });
     if (inTool) html += '</div>';
     return html;
   }
 
-  function appendChatMessage(sender, text, isAgent = false, avatarLetter = null) {
+  function appendRoomMessage(messageOrSender, text, isAgent = false, avatarLetter = null) {
     if (!teamRoomChatFeed) return;
-    const msg = document.createElement('div');
-    msg.className = `chat-msg ${isAgent ? 'agent' : 'human'}`;
-    const initial = (avatarLetter || (sender ? sender.charAt(0) : '?')).toUpperCase();
-    const formatted = isAgent ? formatToolChatText(text) : `<div class="chat-text">${text}</div>`;
-    msg.innerHTML = `
-      <div class="chat-avatar">${initial}</div>
+
+    let sender = '';
+    let bodyText = '';
+    let isAgentMsg = false;
+    let initial = '';
+    let msgId = '';
+    let timeStr = '';
+
+    if (typeof messageOrSender === 'object' && messageOrSender !== null) {
+      const msg = messageOrSender;
+      msgId = msg.id || '';
+      sender = msg.sender_name || (msg.sender_type === 'human' ? 'You' : (msg.sender_id || 'Agent'));
+      bodyText = msg.text || '';
+      isAgentMsg = msg.sender_type === 'agent' || isAgent;
+      initial = (sender ? sender.charAt(0) : '?').toUpperCase();
+      timeStr = msg.created_at ? new Date(msg.created_at).toLocaleTimeString() : new Date().toLocaleTimeString();
+    } else {
+      sender = String(messageOrSender || '');
+      bodyText = String(text || '');
+      isAgentMsg = !!isAgent;
+      initial = (avatarLetter || (sender ? sender.charAt(0) : '?')).toUpperCase();
+      timeStr = new Date().toLocaleTimeString();
+    }
+
+    if (msgId && renderedMessageIds.has(msgId)) {
+      return; // Deduplicate
+    }
+    if (msgId) {
+      renderedMessageIds.add(msgId);
+    }
+
+    // Remove empty state if present
+    const emptyState = document.getElementById('chat-empty-state');
+    if (emptyState) emptyState.remove();
+
+    const msgEl = document.createElement('div');
+    msgEl.className = `chat-msg ${isAgentMsg ? 'agent' : 'human'}`;
+    if (msgId) msgEl.dataset.messageId = msgId;
+
+    const safeSender = escapeHtml(sender);
+    const safeInitial = escapeHtml(initial);
+    const safeTime = escapeHtml(timeStr);
+
+    let contentHtml = '';
+    if (isAgentMsg) {
+      contentHtml = formatToolChatText(bodyText);
+    } else {
+      contentHtml = `<div class="chat-text">${escapeHtml(bodyText)}</div>`;
+    }
+
+    msgEl.innerHTML = `
+      <div class="chat-avatar">${safeInitial}</div>
       <div class="chat-body">
         <div class="chat-meta">
-          <span class="chat-sender">${sender}</span>
-          <span class="chat-time">${new Date().toLocaleTimeString()}</span>
+          <span class="chat-sender">${safeSender}</span>
+          <span class="chat-time">${safeTime}</span>
         </div>
-        ${formatted}
+        ${contentHtml}
       </div>
     `;
-    teamRoomChatFeed.appendChild(msg);
+
+    teamRoomChatFeed.appendChild(msgEl);
+    if (localStorage.getItem('agentcrew-autoscroll') !== 'false') {
+      teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
+    }
+    return msgEl;
+  }
+  const appendChatMessage = appendRoomMessage;
+
+  function appendPendingIndicator(agentName) {
+    removePendingIndicator();
+    if (!teamRoomChatFeed) return;
+    const item = document.createElement('div');
+    item.className = 'chat-msg agent pending';
+    item.id = 'chat-pending-msg';
+    const initials = escapeHtml((agentName || 'AG').slice(0, 2).toUpperCase());
+    item.innerHTML = `
+      <div class="chat-avatar">${initials}</div>
+      <div class="chat-body">
+        <div class="chat-meta">
+          <span class="chat-sender">${escapeHtml(agentName || 'Agent')}</span>
+          <span class="chat-time">thinking...</span>
+        </div>
+        <div class="chat-paragraph">
+          Processing request<span class="thinking-dots"><span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span></span>
+        </div>
+      </div>
+    `;
+    teamRoomChatFeed.appendChild(item);
     teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
+    pendingIndicatorEl = item;
   }
 
-  function seedInitialCockpitFeed(agent) {
+  function removePendingIndicator() {
+    if (pendingIndicatorEl && pendingIndicatorEl.parentNode) {
+      pendingIndicatorEl.remove();
+    }
+    const old = document.getElementById('chat-pending-msg');
+    if (old) old.remove();
+    pendingIndicatorEl = null;
+  }
+
+  function setPromptInFlight(inFlight, statusText = '') {
+    isPromptInFlight = inFlight;
+    if (btnSendChat) btnSendChat.hidden = inFlight;
+    const btnCancel = document.getElementById('btn-cancel-chat');
+    if (btnCancel) btnCancel.hidden = !inFlight;
+
+    const elTurnsCount = document.getElementById('topbar-turns-count');
+
+    if (inFlight) {
+      if (window.agentCrewOrb) window.agentCrewOrb.setActivity(0.85);
+      const orbStatusText = document.getElementById('orb-status-text');
+      if (orbStatusText) orbStatusText.textContent = statusText || 'WORKING · PROMPT IN FLIGHT';
+      if (elTurnsCount) {
+        const curTurns = parseInt(elTurnsCount.textContent || '0', 10);
+        if (curTurns === 0) elTurnsCount.textContent = '1';
+      }
+    } else {
+      inFlightAgentName = '';
+      if (window.agentCrewOrb) window.agentCrewOrb.setActivity(0.0);
+      const orbStatusText = document.getElementById('orb-status-text');
+      if (orbStatusText) orbStatusText.textContent = 'IDLE · STANDBY';
+      removePendingIndicator();
+      promptAbortController = null;
+      if (elTurnsCount && Array.isArray(liveAgents)) {
+        const workingCount = liveAgents.filter(a => getAgentStatus(a) === 'working').length;
+        elTurnsCount.textContent = String(workingCount);
+      }
+    }
+  }
+
+  function cancelPendingPrompt() {
+    if (promptAbortController) {
+      promptAbortController.abort();
+      promptAbortController = null;
+    }
+    inFlightAgentName = '';
+    setPromptInFlight(false);
+  }
+
+  function renderChatEmptyState(agent) {
     if (!teamRoomChatFeed) return;
-    const name = agent?.name || 'Full-Stack Developer';
-    const initials = name.slice(0, 2).toUpperCase();
+    teamRoomChatFeed.replaceChildren();
+    renderedMessageIds.clear();
+    if (!agent) {
+      const emptyBox = document.createElement('div');
+      emptyBox.className = 'chat-empty-state';
+      emptyBox.id = 'chat-empty-state';
+      emptyBox.innerHTML = `
+        <div class="chat-empty-icon">💬</div>
+        <h3 class="chat-empty-name">Team Room Feed</h3>
+        <p class="chat-empty-hint">Select an agent from the roster to start collaborating or review activity.</p>
+      `;
+      teamRoomChatFeed.appendChild(emptyBox);
+      return;
+    }
+    const name = escapeHtml(agent.name || 'Agent');
+    const role = escapeHtml(agent.role || 'Team Member');
+    const provider = escapeHtml(agent.provider || 'configured');
+    const model = escapeHtml(agent.model ? ` (${agent.model})` : '');
     const color = getAgentColor ? getAgentColor(agent) : '#0284c7';
-    teamRoomChatFeed.innerHTML = `
-      <div class="chat-msg agent">
-        <div class="chat-avatar" style="background:${color};color:#fff;">${initials}</div>
-        <div class="chat-body">
-          <div class="chat-meta">
-            <span class="chat-sender">${name}</span>
-            <span class="chat-time">Just now</span>
-          </div>
-          <div class="chat-paragraph">
-            Found it. The list renders each user as a plain row. I'll extract a small component, wire it in, and keep the existing data flow untouched so the change stays isolated and easy to review.
-          </div>
-          <div class="tool-call-card">
-            <div class="tool-call-header">
-              <span class="tool-dot">●</span>
-              <strong class="tool-name">Edit</strong><span class="tool-target">(src/components/UserList.tsx)</span>
-            </div>
-            <div class="tool-call-body">
-              └ Applied 3-line change
-            </div>
-          </div>
-          <div class="tool-call-card">
-            <div class="tool-call-header">
-              <span class="tool-dot">●</span>
-              <strong class="tool-name">Write</strong><span class="tool-target">(src/components/Avatar.tsx)</span>
-            </div>
-            <div class="tool-call-body">
-              └ Wrote 42 lines to new file
-            </div>
-          </div>
-          <div class="chat-paragraph">
-            Done. The component compiles and the render path is unchanged apart from the new avatar. You can review the diff in the Changes tab.
-          </div>
-          <div class="tool-metrics">
-            └ done · 1,284.5 tok/s · 6.4s
-          </div>
-          <div class="demo-notice-box">
-            This reply is simulated for the AgentsRoom demo.<br>
-            Download AgentsRoom to run real agents on your code:<br>
-            <a href="https://agentsroom.dev/download" target="_blank" rel="noreferrer">https://agentsroom.dev/download</a>
-          </div>
-        </div>
+    const initials = escapeHtml((agent.name || 'AG').slice(0, 2).toUpperCase());
+    const owned = isAgentHumanOwned ? isAgentHumanOwned(agent) : false;
+    const statusMeta = (typeof agentStatusMeta !== 'undefined' && getAgentStatus) ? agentStatusMeta[getAgentStatus(agent)] : { label: 'Available' };
+    const statusLabel = owned ? 'Human Owned' : (statusMeta?.label || 'Available');
+
+    const container = document.createElement('div');
+    container.className = 'chat-empty-state';
+    container.id = 'chat-empty-state';
+    container.innerHTML = `
+      <div class="chat-empty-avatar" style="background:${color};">${initials}</div>
+      <h3 class="chat-empty-name">${name}</h3>
+      <div class="chat-empty-role">${role}</div>
+      <div class="chat-empty-provider">
+        <span class="provider-pill">${provider}${model}</span>
+        <span class="status-pill">${statusLabel}</span>
       </div>
+      <div class="chat-empty-divider"></div>
+      <p class="chat-empty-hint">No messages yet with <strong>${name}</strong>. Send a prompt below to assign work, discuss changes, or orchestrate tasks.</p>
     `;
-    teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
+    teamRoomChatFeed.appendChild(container);
+  }
+
+  async function loadAgentRoomFeed(agent) {
+    if (!teamRoomChatFeed) return;
+    const seq = ++feedRequestSeq;
+    const agentName = agent?.name || selectedAgentName;
+    teamRoomChatFeed.replaceChildren();
+    renderedMessageIds.clear();
+
+    try {
+      const qs = new URLSearchParams();
+      qs.set('channel', 'team-activity');
+      if (currentProjectId) qs.set('project_id', currentProjectId);
+      const res = await fetch(`/api/v1/room/messages?${qs.toString()}`);
+      if (seq !== feedRequestSeq) return;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (seq !== feedRequestSeq) return;
+      const messages = Array.isArray(data.messages) ? data.messages : [];
+
+      const relevant = messages.filter(m => {
+        if (!agentName) return true;
+        const lowerName = agentName.toLowerCase();
+        const sender = (m.sender_name || '').toLowerCase();
+        const senderId = (m.sender_id || '').toLowerCase();
+        const text = (m.text || '').toLowerCase();
+        const target = (m.metadata?.target_agent || '').toLowerCase();
+        return sender === lowerName || senderId === lowerName || text.includes('@' + lowerName) || target === lowerName;
+      });
+
+      if (relevant.length === 0) {
+        if (!teamRoomChatFeed.querySelector('.chat-msg:not(.pending)')) {
+          renderChatEmptyState(agent);
+        }
+      } else {
+        relevant.forEach(msg => appendRoomMessage(msg));
+      }
+    } catch (err) {
+      if (seq !== feedRequestSeq) return;
+      console.warn('Could not load room messages:', err);
+      if (!teamRoomChatFeed.querySelector('.chat-msg:not(.pending)')) {
+        renderChatEmptyState(agent);
+      }
+    }
   }
 
   function log(text, type = 'system') {
@@ -539,9 +720,9 @@ document.addEventListener('DOMContentLoaded', () => {
         pill.className = 'legend-item';
         const linesInfo = act.lines[key] ? ` (+${act.lines[key].added} / -${act.lines[key].removed})` : '';
         pill.innerHTML = `
-          <span class="legend-dot" style="background:${person.color};"></span>
-          <strong>${person.name || key}</strong>
-          <span style="font-size:0.7rem; color:var(--text-muted);">${linesInfo}</span>
+          <span class="legend-dot" style="background:${escapeHtml(person.color || '#0284c7')};"></span>
+          <strong>${escapeHtml(person.name || key)}</strong>
+          <span style="font-size:0.7rem; color:var(--text-muted);">${escapeHtml(linesInfo)}</span>
         `;
         legendContainer.appendChild(pill);
       }
@@ -557,12 +738,12 @@ document.addEventListener('DOMContentLoaded', () => {
     analyticsData.people.forEach(p => {
       const item = document.createElement('div');
       item.className = 'contributor-item';
-      item.style.setProperty('--avatar-color', p.color);
+      item.style.setProperty('--avatar-color', p.color || '#0284c7');
       item.innerHTML = `
-        <img class="contributor-avatar" src="${p.avatar}" alt="${p.name}">
+        <img class="contributor-avatar" src="${escapeHtml(p.avatar)}" alt="${escapeHtml(p.name)}">
         <div class="contributor-info">
-          <span class="contributor-name">${p.name}</span>
-          <span class="contributor-role">${p.role}</span>
+          <span class="contributor-name">${escapeHtml(p.name)}</span>
+          <span class="contributor-role">${escapeHtml(p.role)}</span>
         </div>
       `;
       grid.appendChild(item);
@@ -603,24 +784,24 @@ document.addEventListener('DOMContentLoaded', () => {
       card.dataset.number = pr.number;
       card.setAttribute('aria-label', `Open pull request ${pr.number}: ${pr.title}`);
 
-      const statusBadgeClass = pr.status.kind === 'merged' ? 'badge-success' : (pr.status.kind === 'review' ? 'badge-warning' : '');
+      const statusBadgeClass = pr.status?.kind === 'merged' ? 'badge-success' : (pr.status?.kind === 'review' ? 'badge-warning' : '');
 
       card.innerHTML = `
         <div class="pr-card-header">
-          <span class="badge ${statusBadgeClass}">${pr.status.label}</span>
-          <span style="font-size:0.75rem; color:var(--text-muted);">${pr.age} ago</span>
+          <span class="badge ${escapeHtml(statusBadgeClass)}">${escapeHtml(pr.status?.label || '')}</span>
+          <span style="font-size:0.75rem; color:var(--text-muted);">${escapeHtml(pr.age || '')} ago</span>
         </div>
-        <div class="pr-title-text">${pr.title}</div>
+        <div class="pr-title-text">${escapeHtml(pr.title || '')}</div>
         <div class="pr-meta-row">
           <div class="pr-author-chip">
-            <img class="author-avatar-sm" src="${author.avatar}" alt="${author.name}">
-            <span>@${pr.author}</span>
+            <img class="author-avatar-sm" src="${escapeHtml(author.avatar)}" alt="${escapeHtml(author.name)}">
+            <span>@${escapeHtml(pr.author)}</span>
           </div>
           <span>·</span>
-          <span>${pr.repository}</span>
+          <span>${escapeHtml(pr.repository || '')}</span>
           <div class="pr-diff-tags">
-            <span class="diff-add">+${pr.additions}</span>
-            <span class="diff-del">-${pr.deletions}</span>
+            <span class="diff-add">+${Number(pr.additions) || 0}</span>
+            <span class="diff-del">-${Number(pr.deletions) || 0}</span>
           </div>
         </div>
       `;
@@ -657,11 +838,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const probEl = document.getElementById('pr-panel-problem');
     const problems = Array.isArray(pr.problem) ? pr.problem : [pr.problem || 'No description provided.'];
-    if (probEl) probEl.innerHTML = problems.map(p => `<p>${p}</p>`).join('');
+    if (probEl) {
+      probEl.replaceChildren();
+      problems.forEach(p => {
+        const pEl = document.createElement('p');
+        pEl.textContent = p;
+        probEl.appendChild(pEl);
+      });
+    }
 
     const appEl = document.getElementById('pr-panel-approach');
     const approaches = Array.isArray(pr.approach) ? pr.approach : [pr.approach || 'No approach summary provided.'];
-    if (appEl) appEl.innerHTML = approaches.map(a => `<p>${a}</p>`).join('');
+    if (appEl) {
+      appEl.replaceChildren();
+      approaches.forEach(a => {
+        const aEl = document.createElement('p');
+        aEl.textContent = a;
+        appEl.appendChild(aEl);
+      });
+    }
 
     // Reset Assistant response
     const respBox = document.getElementById('assistant-response-card');
@@ -806,15 +1001,15 @@ document.addEventListener('DOMContentLoaded', () => {
       card.innerHTML = `
         <div class="repo-card-top">
           <div>
-            <h4 class="repo-card-name">${repo.name}</h4>
-            <p class="repo-card-desc">${repo.description}</p>
+            <h4 class="repo-card-name">${escapeHtml(repo.name || '')}</h4>
+            <p class="repo-card-desc">${escapeHtml(repo.description || '')}</p>
           </div>
-          <span class="badge badge-success">${repo.status}</span>
+          <span class="badge badge-success">${escapeHtml(repo.status || '')}</span>
         </div>
         <div class="repo-card-footer">
-          <span class="branch-pill">🌿 ${repo.branch}</span>
-          <span>${repo.worktreesCount} active worktrees</span>
-          <span style="color:var(--text-muted);">${repo.lastSync}</span>
+          <span class="branch-pill">🌿 ${escapeHtml(repo.branch || '')}</span>
+          <span>${escapeHtml(String(repo.worktreesCount || 0))} active worktrees</span>
+          <span style="color:var(--text-muted);">${escapeHtml(repo.lastSync || '')}</span>
         </div>
       `;
       reposCardsGrid.appendChild(card);
@@ -859,6 +1054,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // Update brand name & current project title
+      if (data.workspace?.id) {
+        currentProjectId = data.workspace.id;
+      }
       const brandTitle = document.getElementById('brand-title');
       if (brandTitle && data.workspace?.name) {
         brandTitle.textContent = data.workspace.name;
@@ -965,9 +1163,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (backupModel) backupModel.value = agent.backup_model || '';
 
-    // Seed cockpit initial feed for selected agent
-    if (!teamRoomChatFeed || teamRoomChatFeed.children.length <= 1) {
-      seedInitialCockpitFeed(agent);
+    // Load real persisted messages for selected agent or honest empty state
+    loadAgentRoomFeed(agent);
+    if (teamChatInput) {
+      teamChatInput.placeholder = `Ask ${agent.name} to code, review, or orchestrate... (Enter to send, Shift+Enter for new line)`;
     }
   }
 
@@ -1062,11 +1261,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const elCountToReview = document.getElementById('count-to-review');
     const elCountWorking = document.getElementById('count-working');
     const elNeedsInputCount = document.getElementById('needs-input-count');
+    const elTurnsCount = document.getElementById('topbar-turns-count');
 
     if (elCountNeedsYou) elCountNeedsYou.textContent = String(needsYouCount);
     if (elCountToReview) elCountToReview.textContent = String(toReviewCount);
     if (elCountWorking) elCountWorking.textContent = String(workingCount || 2);
-    if (elNeedsInputCount) elNeedsInputCount.textContent = String(needsYouCount || 1);
+    if (elNeedsInputCount) elNeedsInputCount.textContent = String(needsYouCount);
+    if (elTurnsCount) elTurnsCount.textContent = String(workingCount || (isPromptInFlight ? 1 : 0));
 
     const counts = groups.map(([status, label]) => ({ status, label, count: liveAgents.filter(agent => getAgentStatus(agent) === status).length }));
     if (agentStatusSummary) {
@@ -1081,7 +1282,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function selectAgent(agent) {
+  function selectAgent(agentOrName) {
+    const agent = (typeof agentOrName === 'string')
+      ? liveAgents.find(item => item.name === agentOrName)
+      : agentOrName;
     if (!agent) return;
     const changedAgent = selectedAgentName && selectedAgentName !== agent.name;
     if (changedAgent && ptySocket) disconnectPty();
@@ -1093,8 +1297,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function selectAgentByName(name) {
-    const agent = liveAgents.find(item => item.name === name);
-    if (agent) selectAgent(agent);
+    selectAgent(name);
   }
 
   agentFilterButtons.forEach(button => {
@@ -1228,15 +1431,66 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
+    sse.addEventListener('room.message', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (!data || !data.text) return;
+        if (data.id && renderedMessageIds.has(data.id)) return;
+
+        const isAgent = data.sender_type === 'agent';
+        const sender = data.sender_name || data.sender_id || 'Agent';
+        const currentAgent = (selectedAgentName || '').toLowerCase();
+
+        const matchesAgent = !selectedAgentName ||
+          sender.toLowerCase() === currentAgent ||
+          (data.text && data.text.toLowerCase().includes('@' + currentAgent)) ||
+          (data.metadata?.target_agent && data.metadata.target_agent.toLowerCase() === currentAgent);
+
+        if (matchesAgent) {
+          appendRoomMessage(data);
+          if (isAgent) {
+            const matchesInFlight = Boolean(inFlightAgentName && (data.sender_name || data.sender_id || '').toLowerCase() === inFlightAgentName.toLowerCase());
+            if (matchesInFlight) {
+              removePendingIndicator();
+              setPromptInFlight(false);
+            }
+            if (pixelRenderer) {
+              const preview = data.text.replace(/\[\d+m/g, '').replace(/[\r\n]+/g, ' ').slice(0, 28);
+              pixelRenderer.showSpeechBubble(sender, preview, 5000);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Error processing SSE room.message:', err);
+      }
+    });
+
     sse.addEventListener('agent_thinking', (e) => {
       const data = JSON.parse(e.data);
       pixelRenderer?.updateAgentStates([{ name: data.agent_id, state: 'thinking' }]);
     });
 
-    sse.addEventListener('agent_thinking_ended', (e) => {
-      const data = JSON.parse(e.data);
-      pixelRenderer?.updateAgentStates([{ name: data.agent_id, state: data.state || 'idle' }]);
+    sse.addEventListener('agent.thinking_started', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (window.agentCrewOrb) window.agentCrewOrb.setActivity(0.9);
+        const orbStatusText = document.getElementById('orb-status-text');
+        if (orbStatusText) orbStatusText.textContent = `WORKING · ${(data.agent_id || 'AGENT').toUpperCase()} THINKING`;
+        pixelRenderer?.updateAgentStates([{ name: data.agent_id, state: 'thinking' }]);
+      } catch (_) {}
     });
+
+    const handleThinkingEnded = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (Boolean(data.agent_id && inFlightAgentName && data.agent_id.toLowerCase() === inFlightAgentName.toLowerCase())) {
+          setPromptInFlight(false);
+        }
+        pixelRenderer?.updateAgentStates([{ name: data.agent_id, state: data.state || 'idle' }]);
+      } catch (_) {}
+    };
+    sse.addEventListener('agent_thinking_ended', handleThinkingEnded);
+    sse.addEventListener('agent.thinking_ended', handleThinkingEnded);
 
     sse.addEventListener('command_executed', (e) => {
       const data = JSON.parse(e.data);
@@ -1247,6 +1501,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     sse.addEventListener('project.activated', async (e) => {
       const data = JSON.parse(e.data);
+      currentProjectId = data.project?.id || data.project_id || currentProjectId;
       log(`Active project changed to ${data.project?.name || data.project_id}`, 'system');
       switchView('view-team-room');
       await loadProjects();
@@ -1616,49 +1871,70 @@ document.addEventListener('DOMContentLoaded', () => {
   // Load Tasks into Kanban
   async function loadTasks() {
     let tasks = [];
+    let fetchError = null;
     try {
       const res = await fetch('/api/v1/tasks');
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json();
-      if (Array.isArray(data.tasks) && data.tasks.length > 0) {
+      if (Array.isArray(data.tasks)) {
         tasks = data.tasks;
       }
     } catch (err) {
       console.warn('Failed to fetch tasks from /api/v1/tasks:', err);
+      fetchError = err;
     }
+    cachedTasks = tasks;
 
-    if (tasks.length === 0) {
-      tasks = [
-        { id: 'TASK-13', title: 'Provider Qualification Spikes (agy, Codex, Gemini)', stage: 'done', owner: 'Arthur (Architect)' },
-        { id: 'TASK-14', title: 'Workspace SQLite Schema & 13 Agent Identities', stage: 'done', owner: 'Dev-1' },
-        { id: 'TASK-15', title: 'Provider Plugin Engine & 4-Turn Scheduler', stage: 'done', owner: 'Dev-2' },
-        { id: 'TASK-16', title: 'Browser Session Takeover with 10s Soft Budget', stage: 'done', owner: 'Dev-3' },
-        { id: 'TASK-17', title: 'Requirements Intake & Joint Planning Package', stage: 'review', owner: 'Alice (BA)' },
-        { id: 'TASK-18', title: 'Worktree Task Lifecycle & Design Reviews', stage: 'qa', owner: 'QA-1 (Tester)' },
-        { id: 'TASK-19', title: 'Commit-Bound Approvals & Revision Invalidation', stage: 'done', owner: 'Dev-4' },
-        { id: 'TASK-20', title: 'Iteration Branch Integration Strategy', stage: 'in_progress', owner: 'Integrator-1' },
-        { id: 'TASK-21', title: 'Popup Scope Change Engine (P-xxx)', stage: 'planning', owner: 'Peter (PO)' },
-        { id: 'TASK-25', title: 'Supervisor HTTP & SSE Server Daemon', stage: 'done', owner: 'Dev-1' },
-        { id: 'TASK-26', title: 'Interactive Web UI Full-Screen Dashboards', stage: 'done', owner: 'Dev-2' },
-        { id: 'TASK-27', title: 'CLI Server Command & User Workflow', stage: 'done', owner: 'Dev-3' }
-      ];
-    }
+    const stages = [
+      { key: 'planning', label: 'Planning' },
+      { key: 'in_progress', label: 'In Progress' },
+      { key: 'review', label: 'Review' },
+      { key: 'qa', label: 'QA' },
+      { key: 'done', label: 'Done' }
+    ];
 
-    ['planning', 'in_progress', 'review', 'qa', 'done'].forEach(stage => {
+    stages.forEach(({ key: stage, label }) => {
       const col = document.getElementById(`tasks-${stage}`);
       if (!col) return;
-      col.innerHTML = '';
+      col.replaceChildren();
+
+      if (fetchError) {
+        const errEl = document.createElement('div');
+        errEl.className = 'kanban-error-state';
+        errEl.innerHTML = `
+          <span>Failed to load tasks</span>
+          <button type="button" class="btn btn-secondary btn-sm kanban-retry-btn">Retry</button>
+        `;
+        const retryBtn = errEl.querySelector('.kanban-retry-btn');
+        if (retryBtn) {
+          retryBtn.addEventListener('click', () => loadTasks());
+        }
+        col.appendChild(errEl);
+        return;
+      }
+
       const stageTasks = tasks.filter(t => t.stage === stage);
+      if (stageTasks.length === 0) {
+        const emptyEl = document.createElement('div');
+        emptyEl.className = 'kanban-empty-placeholder';
+        emptyEl.textContent = `No tasks in ${label}`;
+        col.appendChild(emptyEl);
+        return;
+      }
+
       stageTasks.forEach(task => {
         const item = document.createElement('div');
         item.className = 'task-item';
         const prioBadge = task.priority === 'high' ? '<span class="badge badge-warning" style="font-size:0.65rem; padding: 2px 6px;">high</span>' : '';
         item.innerHTML = `
           <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 4px;">
-            <span class="task-id" style="font-weight:700;">${task.id}</span>
+            <span class="task-id" style="font-weight:700;">${escapeHtml(task.id || '')}</span>
             ${prioBadge}
           </div>
-          <div class="task-title" style="font-weight:600; font-size:0.85rem; line-height: 1.3; margin-bottom: 4px;">${task.title}</div>
-          <div class="task-owner" style="font-size:0.75rem; color:var(--text-muted);">${task.owner}</div>
+          <div class="task-title" style="font-weight:600; font-size:0.85rem; line-height: 1.3; margin-bottom: 4px;">${escapeHtml(task.title || '')}</div>
+          <div class="task-owner" style="font-size:0.75rem; color:var(--text-muted);">${escapeHtml(task.owner || '')}</div>
         `;
         col.appendChild(item);
       });
@@ -1718,6 +1994,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to fetch projects');
       const projects = Array.isArray(data.projects) ? data.projects : [];
+      const active = projects.find(p => p.is_active);
+      if (active) currentProjectId = active.id;
       renderProjectDock(projects);
     } catch (err) {
       console.warn('Could not load projects:', err);
@@ -1748,8 +2026,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const initial = (proj.name || 'P').trim().charAt(0).toUpperCase();
         item.title = `${proj.name} (${proj.mode === 'multi_worktree' ? 'Multi-Worktree' : 'Independent'})\n${proj.path}`;
         item.innerHTML = `
-          <div class="project-dock-avatar">${initial}</div>
-          <span class="project-dock-tooltip">${proj.name}</span>
+          <div class="project-dock-avatar">${escapeHtml(initial)}</div>
+          <span class="project-dock-tooltip">${escapeHtml(proj.name)}</span>
         `;
         item.addEventListener('click', async () => {
           if (proj.is_active) {
@@ -1762,6 +2040,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const actData = await actRes.json();
             if (!actRes.ok) throw new Error(actData.error || 'Activation failed');
+            currentProjectId = proj.id;
             log(`Switched active project to ${proj.name}`, 'system');
             switchView('view-team-room');
             await loadProjects();
@@ -1809,31 +2088,340 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // --- Shared Accessible Dialog Modal & Global Toast Notifications (Phase 2) ---
+  const sharedDialogModal = document.getElementById('shared-dialog-modal');
+  const sharedDialogCard = document.getElementById('shared-dialog-card');
+  const sharedDialogTitle = document.getElementById('shared-dialog-title');
+  const sharedDialogSubtitle = document.getElementById('shared-dialog-subtitle');
+  const sharedDialogBody = document.getElementById('shared-dialog-body');
+  const btnCloseSharedDialog = document.getElementById('btn-close-shared-dialog');
+  const globalToastContainer = document.getElementById('global-toast-container');
+  let activeModalCloseHandler = null;
+  let lastDialogTrigger = null;
+
+  function openModalDialog({ title, subtitle, contentHtml, onRender, onClose }) {
+    if (!sharedDialogModal || !sharedDialogBody) return;
+    lastDialogTrigger = document.activeElement;
+    if (sharedDialogTitle) sharedDialogTitle.textContent = title || 'Dialog';
+    if (sharedDialogSubtitle) {
+      if (subtitle) {
+        sharedDialogSubtitle.textContent = subtitle;
+        sharedDialogSubtitle.hidden = false;
+      } else {
+        sharedDialogSubtitle.hidden = true;
+      }
+    }
+    sharedDialogBody.innerHTML = contentHtml || '';
+    sharedDialogModal.hidden = false;
+    activeModalCloseHandler = onClose || null;
+
+    if (typeof onRender === 'function') {
+      try { onRender(sharedDialogBody); } catch (err) { console.warn('Dialog onRender error:', err); }
+    }
+
+    const firstFocusable = sharedDialogCard?.querySelector('input:not([type="hidden"]), select, textarea, button:not(#btn-close-shared-dialog)') || btnCloseSharedDialog;
+    firstFocusable?.focus();
+  }
+
+  function closeModalDialog() {
+    if (!sharedDialogModal || sharedDialogModal.hidden) return;
+    sharedDialogModal.hidden = true;
+    if (sharedDialogBody) sharedDialogBody.innerHTML = '';
+    if (typeof activeModalCloseHandler === 'function') {
+      const handler = activeModalCloseHandler;
+      activeModalCloseHandler = null;
+      try { handler(); } catch (_) {}
+    }
+    if (lastDialogTrigger && typeof lastDialogTrigger.focus === 'function') {
+      try { lastDialogTrigger.focus(); } catch (_) {}
+      lastDialogTrigger = null;
+    }
+  }
+
+  if (btnCloseSharedDialog) {
+    btnCloseSharedDialog.addEventListener('click', closeModalDialog);
+  }
+
+  if (sharedDialogModal) {
+    sharedDialogModal.addEventListener('click', (e) => {
+      if (e.target === sharedDialogModal) {
+        closeModalDialog();
+      }
+    });
+
+    sharedDialogModal.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') {
+        const focusables = Array.from(sharedDialogCard?.querySelectorAll(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        ) || []);
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first || !sharedDialogCard?.contains(document.activeElement)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last || !sharedDialogCard?.contains(document.activeElement)) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    });
+  }
+
+  function showToast(message, type = 'info', durationMs = 3500) {
+    if (!globalToastContainer) return;
+    const toast = document.createElement('div');
+    toast.className = `global-toast-item toast-${type}`;
+    const icon = type === 'success' ? '✓' : type === 'error' ? '✕' : type === 'warning' ? '⚠' : 'ℹ';
+    toast.innerHTML = `
+      <span class="toast-icon">${icon}</span>
+      <span class="toast-message">${escapeHtml(message)}</span>
+      <button type="button" class="global-toast-close" aria-label="Close notification">✕</button>
+    `;
+    const closeBtn = toast.querySelector('.global-toast-close');
+    let timer = null;
+    const dismiss = () => {
+      if (timer) clearTimeout(timer);
+      toast.style.opacity = '0';
+      toast.style.transform = 'translateY(8px) scale(0.96)';
+      toast.style.transition = 'all 0.15s ease';
+      setTimeout(() => toast.remove(), 160);
+    };
+    closeBtn?.addEventListener('click', dismiss);
+    timer = setTimeout(dismiss, durationMs);
+    globalToastContainer.appendChild(toast);
+  }
+
+  // --- Composer Attachments State & Renderer (Phase 2) ---
+  const activeComposerAttachments = {
+    tools: new Set(),
+    context: new Set(),
+    docs: new Set()
+  };
+
+  function renderComposerAttachments() {
+    const container = document.getElementById('composer-attachments');
+    if (!container) return;
+    container.replaceChildren();
+
+    const totalCount = activeComposerAttachments.tools.size + activeComposerAttachments.context.size + activeComposerAttachments.docs.size;
+    if (totalCount === 0) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+
+    activeComposerAttachments.tools.forEach(tool => {
+      const chip = createAttachmentChip('🔧', `tool:${tool}`, () => {
+        activeComposerAttachments.tools.delete(tool);
+        renderComposerAttachments();
+      });
+      container.appendChild(chip);
+    });
+
+    activeComposerAttachments.context.forEach(ctx => {
+      const chip = createAttachmentChip('📎', ctx, () => {
+        activeComposerAttachments.context.delete(ctx);
+        renderComposerAttachments();
+      });
+      container.appendChild(chip);
+    });
+
+    activeComposerAttachments.docs.forEach(doc => {
+      const chip = createAttachmentChip('📖', doc, () => {
+        activeComposerAttachments.docs.delete(doc);
+        renderComposerAttachments();
+      });
+      container.appendChild(chip);
+    });
+  }
+
+  function createAttachmentChip(icon, label, onRemove) {
+    const chip = document.createElement('div');
+    chip.className = 'attachment-chip';
+    chip.innerHTML = `
+      <span>${icon}</span>
+      <span class="chip-label">${escapeHtml(label)}</span>
+      <button type="button" class="chip-remove-btn" aria-label="Remove ${escapeHtml(label)}">✕</button>
+    `;
+    chip.querySelector('.chip-remove-btn').addEventListener('click', onRemove);
+    return chip;
+  }
+
   // --- Slack-like Chat Sender ---
   async function sendChatMessage() {
-    if (!teamChatInput || !teamChatInput.value.trim()) return;
-    const text = teamChatInput.value.trim();
-    teamChatInput.value = '';
-    const agentId = selectedAgentName || agentSelect?.value || 'Dev-1';
+    if (!teamChatInput) return;
+    const rawText = teamChatInput.value;
+    const trimmed = rawText.trim();
+    if (!trimmed) return;
+    if (isPromptInFlight) return; // Prevent duplicate send while in flight
 
-    appendChatMessage('You', text, false);
+    const targetAgent = liveAgents.find(a => a.name === selectedAgentName) || liveAgents[0] || { name: 'Dev-1', role: 'Full-Stack Developer' };
+    const agentName = targetAgent.name || 'Dev-1';
+
+    const myController = new AbortController();
+    promptAbortController = myController;
+    inFlightAgentName = agentName;
+    setPromptInFlight(true, `WORKING · ${agentName.toUpperCase()} THINKING`);
+
+    // Optimistically clear input, preserving rawText in case of failure
+    teamChatInput.value = '';
+
+    // Snapshot and clear attachments at send start
+    const sentTools = [...activeComposerAttachments.tools];
+    const sentContext = [...activeComposerAttachments.context];
+    const sentDocs = [...activeComposerAttachments.docs];
+    activeComposerAttachments.tools.clear();
+    activeComposerAttachments.context.clear();
+    activeComposerAttachments.docs.clear();
+    renderComposerAttachments();
+
+    // Append human message to feed (appendRoomMessage records renderedMessageIds)
+    const tempMsgId = 'human-' + Date.now();
+    appendRoomMessage({
+      id: tempMsgId,
+      sender_name: 'You',
+      sender_type: 'human',
+      text: trimmed,
+      created_at: new Date().toISOString()
+    });
+
+    // Show pending indicator in feed
+    appendPendingIndicator(agentName);
+
+    // Format text with mention if not present
+    const mention = `@${agentName}`;
+    let dispatchText = trimmed.includes(mention) ? trimmed : `${mention} ${trimmed}`;
+
+    const attachmentNotes = [];
+    if (sentTools.length > 0) attachmentNotes.push(`Tools: [${sentTools.join(', ')}]`);
+    if (sentContext.length > 0) attachmentNotes.push(`Context: [${sentContext.join(', ')}]`);
+    if (sentDocs.length > 0) attachmentNotes.push(`Docs: [${sentDocs.join(', ')}]`);
+    if (attachmentNotes.length > 0) {
+      dispatchText += '\n\n' + attachmentNotes.join(' · ');
+    }
 
     try {
-      const res = await fetch('/api/v1/commands', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          command_type: 'session.exec',
-          payload: { agent_id: agentId, command: text, mode: 'chat', takeover_token: takeoverTokens.get(agentId) }
-        })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to send chat');
-      if (data.result && data.result.output) {
-        appendChatMessage(agentId, data.result.output, true);
+      let dispatched = false;
+
+      // 1. Primary dispatch via POST /api/v1/room/messages
+      try {
+        const res = await fetch('/api/v1/room/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            channel: 'team-activity',
+            sender_type: 'human',
+            sender_id: 'operator',
+            sender_name: 'You',
+            text: dispatchText,
+            metadata: {
+              target_agent: agentName,
+              turn_id: tempMsgId,
+              attached_tools: sentTools,
+              attached_context: sentContext,
+              attached_docs: sentDocs
+            }
+          }),
+          signal: myController.signal
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.message?.id) {
+            renderedMessageIds.add(data.message.id);
+          }
+          dispatched = true;
+        }
+      } catch (postErr) {
+        if (postErr.name === 'AbortError') throw postErr;
+        console.warn('POST /api/v1/room/messages failed, trying takeover fallback:', postErr);
+      }
+
+      // 2. Fallback to session.takeover + session.exec if room/messages was not accepted
+      if (!dispatched) {
+        let token = takeoverTokens.get(agentName);
+        if (!token) {
+          const tokRes = await fetch('/api/v1/commands', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command_type: 'session.takeover',
+              payload: { agent_id: agentName }
+            }),
+            signal: myController.signal
+          });
+          const tokData = await tokRes.json();
+          if (tokData.result?.takeover_token) {
+            token = tokData.result.takeover_token;
+            takeoverTokens.set(agentName, token);
+            persistTakeoverTokens();
+          }
+        }
+
+        const execRes = await fetch('/api/v1/commands', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            command_type: 'session.exec',
+            payload: {
+              agent_id: agentName,
+              command: dispatchText,
+              mode: 'chat',
+              takeover_token: token
+            }
+          }),
+          signal: myController.signal
+        });
+        const execData = await execRes.json();
+        if (!execRes.ok) throw new Error(execData.error || 'Failed to dispatch prompt');
+        if (execData.result && execData.result.output) {
+          if (promptAbortController === myController) {
+            removePendingIndicator();
+            setPromptInFlight(false);
+          }
+          const replyId = 'reply-' + Date.now();
+          appendRoomMessage({
+            id: replyId,
+            sender_name: agentName,
+            sender_type: 'agent',
+            text: execData.result.output,
+            created_at: new Date().toISOString()
+          });
+        }
       }
     } catch (err) {
-      appendChatMessage('System', `Error sending message: ${err.message}`, false, '!');
+      if (promptAbortController === myController) {
+        removePendingIndicator();
+        setPromptInFlight(false);
+        promptAbortController = null;
+      }
+      if (err.name === 'AbortError') {
+        appendRoomMessage('System', 'Prompt cancelled by operator.', false, '!');
+      } else {
+        // PRESERVE INPUT TEXT NON-DESTRUCTIVELY ON FAILURE
+        if (!teamChatInput.value.trim()) {
+          teamChatInput.value = rawText;
+        } else {
+          teamChatInput.value = rawText + '\n' + teamChatInput.value;
+        }
+        sentTools.forEach(t => activeComposerAttachments.tools.add(t));
+        sentContext.forEach(c => activeComposerAttachments.context.add(c));
+        sentDocs.forEach(d => activeComposerAttachments.docs.add(d));
+        renderComposerAttachments();
+        appendRoomMessage('System', `Error sending prompt: ${err.message}`, false, '!');
+      }
+    } finally {
+      if (promptAbortController === myController) {
+        promptAbortController = null;
+      }
     }
   }
 
@@ -1841,10 +2429,16 @@ document.addEventListener('DOMContentLoaded', () => {
     btnSendChat.addEventListener('click', sendChatMessage);
     teamChatInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.isComposing || e.keyCode === 229) return;
         e.preventDefault();
         sendChatMessage();
       }
     });
+  }
+
+  const btnCancelChat = document.getElementById('btn-cancel-chat');
+  if (btnCancelChat) {
+    btnCancelChat.addEventListener('click', cancelPendingPrompt);
   }
 
   // --- AgentsRoom Cockpit Utility Controls ---
@@ -1884,6 +2478,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // --- Topbar Controls & Quick Switchers ---
   document.getElementById('topbar-home-btn')?.addEventListener('click', () => switchView('view-overview'));
   document.getElementById('topbar-inbox-btn')?.addEventListener('click', () => switchView('view-kanban'));
   document.getElementById('btn-topbar-team')?.addEventListener('click', () => switchView('view-team-room'));
@@ -1892,7 +2487,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-topbar-settings')?.addEventListener('click', () => switchView('view-settings'));
   document.getElementById('footer-settings-btn')?.addEventListener('click', () => switchView('view-settings'));
   document.getElementById('btn-open-backlog')?.addEventListener('click', () => switchView('view-kanban'));
-  document.getElementById('btn-open-ideas')?.addEventListener('click', () => switchView('view-kanban'));
   document.getElementById('btn-close-cockpit')?.addEventListener('click', () => switchView('view-overview'));
 
   document.getElementById('topbar-add-btn')?.addEventListener('click', () => {
@@ -1908,6 +2502,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyTheme(next, true);
   });
 
+  // Topbar Needs Input Badge Click
   document.getElementById('topbar-needs-input-badge')?.addEventListener('click', () => {
     switchView('view-team-room');
     activeAgentFilter = 'needs-you';
@@ -1917,9 +2512,785 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.setAttribute('aria-pressed', String(active));
     });
     renderAgentRoster();
-    const needsAgent = liveAgents.find(a => getAgentStatus(a) === 'needs-you');
-    if (needsAgent) selectAgent(needsAgent);
+    const needsAgent = liveAgents.find(a => getAgentStatus(a) === 'needs-you') || liveAgents[0];
+    if (needsAgent) {
+      selectAgent(needsAgent);
+      teamChatInput?.focus();
+    }
   });
+
+  // Topbar Toggle Team Sidebar Button
+  const topbarTeamBtn = document.getElementById('topbar-team-btn');
+  if (topbarTeamBtn) {
+    topbarTeamBtn.addEventListener('click', () => {
+      const rosterPanel = document.querySelector('.agent-roster-panel');
+      const currentActiveView = document.querySelector('.fullscreen-view.active');
+      if (currentActiveView?.id !== 'view-team-room') {
+        switchView('view-team-room');
+        if (rosterPanel) rosterPanel.classList.remove('collapsed');
+      } else if (rosterPanel) {
+        rosterPanel.classList.toggle('collapsed');
+      }
+    });
+  }
+
+  // Topbar Active Turns Modal
+  const topbarSparklePill = document.getElementById('topbar-sparkle-pill');
+  if (topbarSparklePill) {
+    topbarSparklePill.addEventListener('click', () => {
+      const working = liveAgents.filter(a => getAgentStatus(a) === 'working');
+      const needs = liveAgents.filter(a => getAgentStatus(a) === 'needs-you');
+      const turnsCount = working.length || (isPromptInFlight ? 1 : 0);
+
+      const workingListHtml = working.length > 0
+        ? working.map(a => `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#141d2e;border-radius:8px;margin-bottom:6px;">
+              <div>
+                <strong>${escapeHtml(a.name)}</strong> · <span style="color:#94a3b8;font-size:12px;">${escapeHtml(a.role || 'Agent')}</span>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" data-goto-agent="${escapeHtml(a.name)}">Focus Chat</button>
+            </div>
+          `).join('')
+        : `<p style="color:#94a3b8;font-style:italic;margin:8px 0;">No agents currently executing active turns.</p>`;
+
+      openModalDialog({
+        title: 'Active Agent Turns & Concurrency',
+        subtitle: `Currently ${turnsCount} turn(s) active · Concurrency Limit: 4`,
+        contentHtml: `
+          <div style="display:flex;gap:12px;margin-bottom:16px;">
+            <div style="flex:1;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:8px;padding:12px;text-align:center;">
+              <div style="font-size:24px;font-weight:700;color:#38bdf8;">${turnsCount}</div>
+              <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;">Active Turns</div>
+            </div>
+            <div style="flex:1;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:8px;padding:12px;text-align:center;">
+              <div style="font-size:24px;font-weight:700;color:#22c55e;">${liveAgents.length}</div>
+              <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;">Total Agents</div>
+            </div>
+            <div style="flex:1;background:#141d2e;border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:12px;text-align:center;">
+              <div style="font-size:24px;font-weight:700;color:#ef4444;">${needs.length}</div>
+              <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;">Needs Attention</div>
+            </div>
+          </div>
+          <h4 style="margin:12px 0 8px 0;font-size:13px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px;">Active Working Agents</h4>
+          <div id="modal-working-agents-list">
+            ${workingListHtml}
+          </div>
+          <div style="margin-top:20px;text-align:right;">
+            <button type="button" class="btn btn-secondary" id="btn-close-turns-modal">Close</button>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-close-turns-modal')?.addEventListener('click', closeModalDialog);
+          body.querySelectorAll('[data-goto-agent]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const agentName = btn.dataset.gotoAgent;
+              closeModalDialog();
+              switchView('view-team-room');
+              selectAgent(agentName);
+              teamChatInput?.focus();
+            });
+          });
+        }
+      });
+    });
+  }
+
+  // Topbar Help & Keyboard Shortcuts Modal
+  const topbarHelpBtn = document.getElementById('topbar-help-btn');
+  if (topbarHelpBtn) {
+    topbarHelpBtn.addEventListener('click', () => {
+      openModalDialog({
+        title: 'AgentCrew Help & Keyboard Shortcuts',
+        subtitle: 'Productivity guide and keyboard accelerators for high-velocity orchestration',
+        contentHtml: `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+            <div style="background:#141d2e;padding:14px;border-radius:10px;border:1px solid rgba(56,189,248,0.15);">
+              <h4 style="margin:0 0 10px 0;color:#38bdf8;font-size:13px;">Global Shortcuts</h4>
+              <ul style="margin:0;padding-left:18px;font-size:12.5px;color:#e2e8f0;display:flex;flex-direction:column;gap:6px;">
+                <li><kbd>/</kbd> Focus global search palette</li>
+                <li><kbd>Esc</kbd> Close modals, palettes, and dropdowns</li>
+                <li><kbd>Enter</kbd> Send prompt in composer</li>
+                <li><kbd>Shift+Enter</kbd> Insert newline in composer</li>
+                <li><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> Accessible focus navigation</li>
+              </ul>
+            </div>
+            <div style="background:#141d2e;padding:14px;border-radius:10px;border:1px solid rgba(56,189,248,0.15);">
+              <h4 style="margin:0 0 10px 0;color:#38bdf8;font-size:13px;">Views & Cockpit</h4>
+              <ul style="margin:0;padding-left:18px;font-size:12.5px;color:#e2e8f0;display:flex;flex-direction:column;gap:6px;">
+                <li><strong>Cockpit:</strong> Live agent chat feed & real-time PTY terminal</li>
+                <li><strong>Overview:</strong> Velocity charts, project progress, team metrics</li>
+                <li><strong>Board:</strong> 5-column Kanban task board with live assignment</li>
+                <li><strong>Reviews:</strong> Diff inspector, PR status, code review decisions</li>
+                <li><strong>Multi-Worktree:</strong> Git worktrees isolating concurrent agent branches</li>
+              </ul>
+            </div>
+          </div>
+          <div style="text-align:right;margin-top:16px;">
+            <button type="button" class="btn btn-primary" id="btn-close-help-modal">Got it</button>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-close-help-modal')?.addEventListener('click', closeModalDialog);
+        }
+      });
+    });
+  }
+
+  // Topbar Assistant Button
+  const topbarAssistantBtn = document.getElementById('topbar-assistant-btn');
+  if (topbarAssistantBtn) {
+    topbarAssistantBtn.addEventListener('click', () => {
+      switchView('view-team-room');
+      const architect = liveAgents.find(a => (a.role || '').toLowerCase().includes('architect')) || liveAgents[0];
+      if (architect) {
+        selectAgent(architect);
+      }
+      if (teamChatInput) {
+        teamChatInput.focus();
+        if (!teamChatInput.value.includes('@Architect') && architect?.name === 'Architect') {
+          teamChatInput.value = `@Architect ${teamChatInput.value.replace(/^@\w+\s*/, '')}`.trim() + ' ';
+        }
+      }
+      showToast('Switched to Architect assistant in Cockpit', 'info', 2000);
+    });
+  }
+
+  // Topbar User Profile & Operator Preferences
+  const topbarUserProfile = document.getElementById('topbar-user-profile');
+  const topbarUserName = document.getElementById('topbar-user-name');
+
+  const savedOperatorName = localStorage.getItem('agentcrew_operator_name');
+  if (savedOperatorName && topbarUserName) {
+    topbarUserName.textContent = savedOperatorName;
+  }
+
+  if (topbarUserProfile) {
+    topbarUserProfile.addEventListener('click', () => {
+      const currentName = topbarUserName?.textContent || 'Human Operator';
+      const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+      const currentAutoscroll = localStorage.getItem('agentcrew_autoscroll') !== 'false';
+
+      openModalDialog({
+        title: 'Operator Profile & Preferences',
+        subtitle: 'Configure your operator identity, theme, and workspace preferences',
+        contentHtml: `
+          <form id="preferences-form" style="display:flex;flex-direction:column;gap:16px;">
+            <div class="form-group">
+              <label for="pref-operator-name" style="display:block;margin-bottom:6px;font-size:12.5px;color:#94a3b8;">Operator Display Name</label>
+              <input type="text" id="pref-operator-name" class="form-control" value="${escapeHtml(currentName)}" required style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;font-family:inherit;">
+            </div>
+            <div class="form-group">
+              <label style="display:block;margin-bottom:6px;font-size:12.5px;color:#94a3b8;">Color Theme</label>
+              <div style="display:flex;gap:16px;">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="radio" name="pref-theme" value="dark" ${currentTheme === 'dark' ? 'checked' : ''}> Dark Mode
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="radio" name="pref-theme" value="light" ${currentTheme === 'light' ? 'checked' : ''}> Light Mode
+                </label>
+              </div>
+            </div>
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                <input type="checkbox" id="pref-autoscroll" ${currentAutoscroll ? 'checked' : ''}>
+                <span>Auto-scroll feed to latest messages</span>
+              </label>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:8px;">
+              <button type="button" class="btn btn-secondary" id="btn-cancel-prefs">Cancel</button>
+              <button type="submit" class="btn btn-primary" id="btn-save-prefs">Save Preferences</button>
+            </div>
+          </form>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-cancel-prefs')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#preferences-form')?.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const newName = body.querySelector('#pref-operator-name')?.value.trim() || 'Human Operator';
+            const newTheme = body.querySelector('input[name="pref-theme"]:checked')?.value || 'dark';
+            const newAutoscroll = !!body.querySelector('#pref-autoscroll')?.checked;
+
+            localStorage.setItem('agentcrew_operator_name', newName);
+            localStorage.setItem('agentcrew_autoscroll', String(newAutoscroll));
+            if (topbarUserName) topbarUserName.textContent = newName;
+
+            if (newTheme !== currentTheme) {
+              applyTheme(newTheme, true);
+            }
+
+            try {
+              fetch('/api/v1/commands', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  command_type: 'preferences.update',
+                  payload: { operator_name: newName, theme: newTheme, autoscroll: newAutoscroll }
+                })
+              }).catch(() => {});
+            } catch (_) {}
+
+            closeModalDialog();
+            showToast('Operator preferences saved!', 'success');
+          });
+        }
+      });
+    });
+  }
+
+  // --- Global Search Palette Logic ---
+  const topbarSearchInput = document.getElementById('topbar-search-input');
+  const topbarSearchResults = document.getElementById('topbar-search-results');
+  let searchSelectedIdx = -1;
+
+  function renderSearchResults(query) {
+    if (!topbarSearchResults) return;
+    const q = query.trim().toLowerCase();
+    if (!q) {
+      topbarSearchResults.hidden = true;
+      topbarSearchResults.replaceChildren();
+      searchSelectedIdx = -1;
+      return;
+    }
+
+    const views = [
+      { id: 'view-team-room', title: 'Cockpit / Team Room', meta: 'View' },
+      { id: 'view-overview', title: 'Overview Dashboard', meta: 'View' },
+      { id: 'view-kanban', title: 'Board & Tasks', meta: 'View' },
+      { id: 'view-reviews', title: 'Reviews & Pull Requests', meta: 'View' },
+      { id: 'view-repositories', title: 'Repositories', meta: 'View' },
+      { id: 'view-observability', title: 'Metrics & Observability', meta: 'View' },
+      { id: 'view-settings', title: 'Settings', meta: 'View' }
+    ].filter(v => v.title.toLowerCase().includes(q) || v.id.toLowerCase().includes(q));
+
+    const matchedAgents = (Array.isArray(liveAgents) ? liveAgents : []).filter(a =>
+      (a.name || '').toLowerCase().includes(q) ||
+      (a.role || '').toLowerCase().includes(q) ||
+      (a.provider || '').toLowerCase().includes(q) ||
+      (a.model || '').toLowerCase().includes(q)
+    ).slice(0, 5);
+
+    const matchedTasks = (Array.isArray(cachedTasks) ? cachedTasks : []).filter(t =>
+      (t.id || '').toLowerCase().includes(q) ||
+      (t.title || '').toLowerCase().includes(q) ||
+      (t.stage || '').toLowerCase().includes(q) ||
+      (t.assignee || '').toLowerCase().includes(q)
+    ).slice(0, 5);
+
+    const prList = Array.isArray(analyticsData.pullRequests) ? analyticsData.pullRequests : [];
+    const matchedPRs = prList.filter(pr =>
+      (pr.title || '').toLowerCase().includes(q) ||
+      (pr.branch || '').toLowerCase().includes(q) ||
+      (pr.author || '').toLowerCase().includes(q) ||
+      (pr.repository || '').toLowerCase().includes(q)
+    ).slice(0, 5);
+
+    const repoList = Array.isArray(analyticsData.repositories) ? analyticsData.repositories : [];
+    const matchedRepos = repoList.filter(r =>
+      (r.name || '').toLowerCase().includes(q) ||
+      (r.path || '').toLowerCase().includes(q)
+    ).slice(0, 5);
+
+    const totalResults = views.length + matchedAgents.length + matchedTasks.length + matchedPRs.length + matchedRepos.length;
+
+    topbarSearchResults.replaceChildren();
+    searchSelectedIdx = -1;
+
+    if (totalResults === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'search-no-results';
+      empty.textContent = `No results found for "${query}"`;
+      topbarSearchResults.appendChild(empty);
+      topbarSearchResults.hidden = false;
+      return;
+    }
+
+    const appendGroup = (groupTitle, items, makeItem) => {
+      if (items.length === 0) return;
+      const header = document.createElement('div');
+      header.className = 'search-result-group-title';
+      header.textContent = groupTitle;
+      topbarSearchResults.appendChild(header);
+
+      items.forEach(item => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'search-result-item';
+        btn.setAttribute('role', 'option');
+        makeItem(btn, item);
+        topbarSearchResults.appendChild(btn);
+      });
+    };
+
+    appendGroup('Views & Navigation', views, (btn, v) => {
+      btn.dataset.type = 'view';
+      btn.dataset.id = v.id;
+      btn.innerHTML = `<span class="result-title">${escapeHtml(v.title)}</span><span class="result-meta">${escapeHtml(v.meta)}</span>`;
+      btn.addEventListener('click', () => {
+        switchView(v.id);
+        closeSearchPalette();
+      });
+    });
+
+    appendGroup('Agents', matchedAgents, (btn, a) => {
+      btn.dataset.type = 'agent';
+      btn.dataset.id = a.name;
+      btn.innerHTML = `<span class="result-title">🤖 ${escapeHtml(a.name)} · ${escapeHtml(a.role || '')}</span><span class="result-meta">${escapeHtml(a.provider || 'agent')}</span>`;
+      btn.addEventListener('click', () => {
+        switchView('view-team-room');
+        selectAgent(a);
+        teamChatInput?.focus();
+        closeSearchPalette();
+      });
+    });
+
+    appendGroup('Tasks', matchedTasks, (btn, t) => {
+      btn.dataset.type = 'task';
+      btn.dataset.id = t.id;
+      btn.innerHTML = `<span class="result-title">📋 ${escapeHtml(t.id)}: ${escapeHtml(t.title || '')}</span><span class="result-meta">${escapeHtml(t.stage || '')}</span>`;
+      btn.addEventListener('click', () => {
+        switchView('view-kanban');
+        closeSearchPalette();
+      });
+    });
+
+    appendGroup('Pull Requests', matchedPRs, (btn, pr) => {
+      btn.dataset.type = 'pr';
+      btn.dataset.id = String(pr.id || pr.number);
+      btn.innerHTML = `<span class="result-title">🔀 ${escapeHtml(pr.title || 'PR')}</span><span class="result-meta">${escapeHtml(pr.repository || '')}</span>`;
+      btn.addEventListener('click', () => {
+        switchView('view-reviews');
+        selectPR(pr);
+        closeSearchPalette();
+      });
+    });
+
+    appendGroup('Repositories', matchedRepos, (btn, r) => {
+      btn.dataset.type = 'repo';
+      btn.dataset.id = r.name;
+      btn.innerHTML = `<span class="result-title">📁 ${escapeHtml(r.name)}</span><span class="result-meta">${escapeHtml(r.branch || 'trunk')}</span>`;
+      btn.addEventListener('click', () => {
+        switchView('view-repositories');
+        closeSearchPalette();
+      });
+    });
+
+    topbarSearchResults.hidden = false;
+  }
+
+  function closeSearchPalette() {
+    if (!topbarSearchResults) return;
+    topbarSearchResults.hidden = true;
+    if (topbarSearchInput) {
+      topbarSearchInput.value = '';
+      topbarSearchInput.blur();
+    }
+    searchSelectedIdx = -1;
+  }
+
+  if (topbarSearchInput) {
+    topbarSearchInput.addEventListener('input', (e) => {
+      renderSearchResults(e.target.value);
+    });
+
+    topbarSearchInput.addEventListener('focus', () => {
+      if (topbarSearchInput.value.trim()) {
+        renderSearchResults(topbarSearchInput.value);
+      }
+    });
+
+    topbarSearchInput.addEventListener('keydown', (e) => {
+      if (!topbarSearchResults || topbarSearchResults.hidden) return;
+      const items = Array.from(topbarSearchResults.querySelectorAll('.search-result-item'));
+      if (items.length === 0) return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        searchSelectedIdx = (searchSelectedIdx + 1) % items.length;
+        items.forEach((it, idx) => it.classList.toggle('selected', idx === searchSelectedIdx));
+        items[searchSelectedIdx]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        searchSelectedIdx = (searchSelectedIdx - 1 + items.length) % items.length;
+        items.forEach((it, idx) => it.classList.toggle('selected', idx === searchSelectedIdx));
+        items[searchSelectedIdx]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const target = searchSelectedIdx >= 0 ? items[searchSelectedIdx] : items[0];
+        target?.click();
+      }
+    });
+  }
+
+  document.addEventListener('click', (e) => {
+    if (topbarSearchResults && !topbarSearchResults.hidden) {
+      const box = document.querySelector('.topbar-search-box');
+      if (box && !box.contains(e.target)) {
+        topbarSearchResults.hidden = true;
+      }
+    }
+  });
+
+  // Global Keyboard Shortcuts ( / for Search, Esc to Close )
+  document.addEventListener('keydown', (e) => {
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const active = document.activeElement;
+      const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+      if (!isInput) {
+        e.preventDefault();
+        if (topbarSearchInput) {
+          topbarSearchInput.focus();
+          topbarSearchInput.select();
+        }
+      }
+    } else if (e.key === 'Escape') {
+      if (topbarSearchResults && !topbarSearchResults.hidden) {
+        closeSearchPalette();
+        return;
+      }
+      if (sharedDialogModal && !sharedDialogModal.hidden) {
+        closeModalDialog();
+        return;
+      }
+      if (projectWizardModal && !projectWizardModal.hidden) {
+        closeProjectWizard();
+        return;
+      }
+    }
+  });
+
+  // --- Composer Mini-Tools Actions (Phase 2) ---
+  const btnExpandComposer = document.getElementById('btn-expand-composer');
+  const composerContainer = document.getElementById('agentsroom-composer');
+  if (btnExpandComposer && composerContainer) {
+    btnExpandComposer.addEventListener('click', () => {
+      const isExpanded = composerContainer.classList.toggle('composer-expanded');
+      btnExpandComposer.setAttribute('aria-expanded', String(isExpanded));
+      btnExpandComposer.title = isExpanded ? 'Collapse Composer' : 'Expand Composer (Toggle larger editor)';
+    });
+  }
+
+  const btnCodeEditor = document.getElementById('btn-code-editor');
+  if (btnCodeEditor && teamChatInput) {
+    btnCodeEditor.addEventListener('click', () => {
+      const isCodeMode = teamChatInput.classList.toggle('code-mode');
+      btnCodeEditor.classList.toggle('active', isCodeMode);
+      if (isCodeMode && !teamChatInput.value.trim()) {
+        teamChatInput.value = '// Task:\n// Implementation:\n';
+        teamChatInput.focus();
+        teamChatInput.setSelectionRange(teamChatInput.value.length, teamChatInput.value.length);
+      }
+    });
+  }
+
+  const btnChipInsertCode = document.getElementById('btn-chip-insert-code');
+  if (btnChipInsertCode && teamChatInput) {
+    btnChipInsertCode.addEventListener('click', () => {
+      const start = teamChatInput.selectionStart;
+      const end = teamChatInput.selectionEnd;
+      const val = teamChatInput.value;
+      if (start !== end) {
+        const selected = val.substring(start, end);
+        teamChatInput.value = val.substring(0, start) + '```\n' + selected + '\n```' + val.substring(end);
+        teamChatInput.focus();
+        teamChatInput.setSelectionRange(start + 4, start + 4 + selected.length);
+      } else {
+        const codeBlock = '```\n\n```';
+        teamChatInput.value = val.substring(0, start) + codeBlock + val.substring(end);
+        teamChatInput.focus();
+        teamChatInput.setSelectionRange(start + 4, start + 4);
+      }
+    });
+  }
+
+  // + Tools Dialog Chip
+  const btnChipTools = document.getElementById('btn-chip-tools');
+  if (btnChipTools) {
+    btnChipTools.addEventListener('click', () => {
+      const availableTools = [
+        { id: 'bash', name: 'Bash / Shell', desc: 'Execute system commands, test scripts, and build tasks' },
+        { id: 'read_file', name: 'Read File', desc: 'Inspect source code, configuration files, and assets' },
+        { id: 'write_file', name: 'Write File', desc: 'Create or update project source files and patches' },
+        { id: 'git_diff', name: 'Git Diff', desc: 'Inspect staged and unstaged Git tree modifications' },
+        { id: 'test_runner', name: 'Test Runner', desc: 'Run automated node, pytest, or custom test suites' },
+        { id: 'search_code', name: 'Search Code', desc: 'Search symbols, function definitions, and regexes' }
+      ];
+
+      const checkboxesHtml = availableTools.map(t => {
+        const checked = activeComposerAttachments.tools.has(t.id) ? 'checked' : '';
+        return `
+          <label style="display:flex;align-items:flex-start;gap:10px;padding:8px 10px;background:#141d2e;border:1px solid rgba(56,189,248,0.15);border-radius:8px;margin-bottom:8px;cursor:pointer;">
+            <input type="checkbox" name="composer-tool" value="${escapeHtml(t.id)}" ${checked} style="margin-top:3px;">
+            <div>
+              <strong style="color:#e2e8f0;font-size:13px;">${escapeHtml(t.name)}</strong>
+              <div style="font-size:11.5px;color:#94a3b8;">${escapeHtml(t.desc)}</div>
+            </div>
+          </label>
+        `;
+      }).join('');
+
+      openModalDialog({
+        title: 'Attach Tools to Agent Prompt',
+        subtitle: 'Select specialized execution tools to grant or prioritize for this turn',
+        contentHtml: `
+          <div style="max-height:300px;overflow-y:auto;">
+            ${checkboxesHtml}
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-clear-all-tools">Clear All</button>
+            <div style="display:flex;gap:10px;">
+              <button type="button" class="btn btn-secondary" id="btn-cancel-tools">Cancel</button>
+              <button type="button" class="btn btn-primary" id="btn-apply-tools">Apply Tools</button>
+            </div>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-clear-all-tools')?.addEventListener('click', () => {
+            body.querySelectorAll('input[name="composer-tool"]').forEach(cb => cb.checked = false);
+          });
+          body.querySelector('#btn-cancel-tools')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#btn-apply-tools')?.addEventListener('click', () => {
+            activeComposerAttachments.tools.clear();
+            body.querySelectorAll('input[name="composer-tool"]:checked').forEach(cb => {
+              activeComposerAttachments.tools.add(cb.value);
+            });
+            renderComposerAttachments();
+            closeModalDialog();
+            const count = activeComposerAttachments.tools.size;
+            showToast(count > 0 ? `Attached ${count} tool(s) to prompt` : 'Cleared tool attachments', 'info', 2000);
+          });
+        }
+      });
+    });
+  }
+
+  // + Context Dialog Chip
+  const btnChipContext = document.getElementById('btn-chip-context');
+  if (btnChipContext) {
+    btnChipContext.addEventListener('click', async () => {
+      let suggestedFiles = ['package.json', 'README.md', 'src/server/public/app.js', 'src/server/supervisor-server.js'];
+      let suggestedBranches = ['main', 'feat/task-37-multi-project-registry'];
+
+      try {
+        const res = await fetch('/api/v1/context?kind=files');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.files) && data.files.length > 0) {
+            suggestedFiles = data.files.slice(0, 8);
+          }
+        }
+      } catch (_) {}
+
+      try {
+        const res = await fetch('/api/v1/context?kind=branches');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.branches) && data.branches.length > 0) {
+            suggestedBranches = data.branches.slice(0, 4);
+          }
+        }
+      } catch (_) {}
+
+      const filesHtml = suggestedFiles.map(f => {
+        const checked = activeComposerAttachments.context.has(f) ? 'checked' : '';
+        return `
+          <label style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:6px;font-size:12px;margin:3px;cursor:pointer;">
+            <input type="checkbox" name="context-item" value="${escapeHtml(f)}" ${checked}>
+            <span>📄 ${escapeHtml(f)}</span>
+          </label>
+        `;
+      }).join('');
+
+      const branchesHtml = suggestedBranches.map(b => {
+        const val = `branch:${b}`;
+        const checked = activeComposerAttachments.context.has(val) ? 'checked' : '';
+        return `
+          <label style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:6px;font-size:12px;margin:3px;cursor:pointer;">
+            <input type="checkbox" name="context-item" value="${escapeHtml(val)}" ${checked}>
+            <span>🌿 ${escapeHtml(b)}</span>
+          </label>
+        `;
+      }).join('');
+
+      openModalDialog({
+        title: 'Attach Context to Prompt',
+        subtitle: 'Provide specific repository files, branches, or PR diffs for the agent to analyze',
+        contentHtml: `
+          <div style="margin-bottom:14px;">
+            <label style="display:block;margin-bottom:6px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Custom Path or Resource</label>
+            <div style="display:flex;gap:8px;">
+              <input type="text" id="input-custom-context" placeholder="e.g. src/utils/logger.js or #12" style="flex:1;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;font-family:inherit;font-size:13px;">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-add-custom-context">+ Add</button>
+            </div>
+          </div>
+          <div style="margin-bottom:14px;">
+            <label style="display:block;margin-bottom:6px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Suggested Files</label>
+            <div style="display:flex;flex-wrap:wrap;">${filesHtml}</div>
+          </div>
+          <div style="margin-bottom:16px;">
+            <label style="display:block;margin-bottom:6px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Branches & Worktrees</label>
+            <div style="display:flex;flex-wrap:wrap;">${branchesHtml}</div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button type="button" class="btn btn-secondary" id="btn-cancel-context">Cancel</button>
+            <button type="button" class="btn btn-primary" id="btn-apply-context">Apply Context</button>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-cancel-context')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#btn-add-custom-context')?.addEventListener('click', () => {
+            const val = body.querySelector('#input-custom-context')?.value.trim();
+            if (val) {
+              activeComposerAttachments.context.add(val);
+              renderComposerAttachments();
+              const inp = body.querySelector('#input-custom-context');
+              if (inp) inp.value = '';
+              showToast(`Attached ${val}`, 'info', 1500);
+            }
+          });
+          body.querySelector('#btn-apply-context')?.addEventListener('click', () => {
+            body.querySelectorAll('input[name="context-item"]').forEach(cb => {
+              if (cb.checked) {
+                activeComposerAttachments.context.add(cb.value);
+              } else {
+                activeComposerAttachments.context.delete(cb.value);
+              }
+            });
+            renderComposerAttachments();
+            closeModalDialog();
+            const count = activeComposerAttachments.context.size;
+            showToast(count > 0 ? `Attached ${count} context item(s)` : 'Context updated', 'info', 2000);
+          });
+        }
+      });
+    });
+  }
+
+  // 📖 Docs Dialog Chip
+  const btnChipDocs = document.getElementById('btn-chip-docs');
+  if (btnChipDocs) {
+    btnChipDocs.addEventListener('click', () => {
+      const docItems = [
+        { id: 'doc:architecture', title: 'Architecture & System Blueprint', desc: 'Supervisor design, agent state machines, and RPC protocol' },
+        { id: 'doc:api-specs', title: 'REST API & Event Schema', desc: 'Endpoints for /api/v1/projects, room messages, and tasks' },
+        { id: 'doc:coding-standards', title: 'Coding Conventions & Security', desc: 'Async safety, XSS escaping, and test bundle guidelines' },
+        { id: 'doc:worktree-guide', title: 'Multi-Worktree Guide', desc: 'Isolated Git worktrees per agent under .agentcrew/worktrees' }
+      ];
+
+      const docsHtml = docItems.map(d => {
+        const checked = activeComposerAttachments.docs.has(d.id) ? 'checked' : '';
+        return `
+          <label style="display:flex;align-items:flex-start;gap:10px;padding:8px 10px;background:#141d2e;border:1px solid rgba(56,189,248,0.15);border-radius:8px;margin-bottom:8px;cursor:pointer;">
+            <input type="checkbox" name="composer-doc" value="${escapeHtml(d.id)}" ${checked} style="margin-top:3px;">
+            <div>
+              <strong style="color:#e2e8f0;font-size:13px;">${escapeHtml(d.title)}</strong>
+              <div style="font-size:11.5px;color:#94a3b8;">${escapeHtml(d.desc)}</div>
+            </div>
+          </label>
+        `;
+      }).join('');
+
+      openModalDialog({
+        title: 'Attach Documentation & Knowledge',
+        subtitle: 'Include foundational project documentation for the agent to reference',
+        contentHtml: `
+          <div style="max-height:300px;overflow-y:auto;">
+            ${docsHtml}
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+            <button type="button" class="btn btn-secondary" id="btn-cancel-docs">Cancel</button>
+            <button type="button" class="btn btn-primary" id="btn-apply-docs">Apply Docs</button>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-cancel-docs')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#btn-apply-docs')?.addEventListener('click', () => {
+            activeComposerAttachments.docs.clear();
+            body.querySelectorAll('input[name="composer-doc"]:checked').forEach(cb => {
+              activeComposerAttachments.docs.add(cb.value);
+            });
+            renderComposerAttachments();
+            closeModalDialog();
+            const count = activeComposerAttachments.docs.size;
+            showToast(count > 0 ? `Attached ${count} doc(s) to prompt` : 'Docs updated', 'info', 2000);
+          });
+        }
+      });
+    });
+  }
+
+  // Voice Input Speech Recognition
+  let speechRecognitionInstance = null;
+  let isVoiceRecording = false;
+
+  const btnVoiceMic = document.getElementById('btn-voice-mic');
+  if (btnVoiceMic && teamChatInput) {
+    btnVoiceMic.addEventListener('click', () => {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        showToast('Voice input is not supported by your browser.', 'warning');
+        return;
+      }
+
+      if (isVoiceRecording) {
+        speechRecognitionInstance?.stop();
+        return;
+      }
+
+      try {
+        speechRecognitionInstance = new SpeechRecognition();
+        speechRecognitionInstance.continuous = true;
+        speechRecognitionInstance.interimResults = false;
+        speechRecognitionInstance.lang = 'en-US';
+
+        speechRecognitionInstance.onstart = () => {
+          isVoiceRecording = true;
+          btnVoiceMic.classList.add('recording');
+          btnVoiceMic.title = 'Recording voice... Click to stop';
+          showToast('Listening... Speak now', 'info', 2000);
+        };
+
+        speechRecognitionInstance.onresult = (event) => {
+          let transcript = '';
+          const startIndex = typeof event.resultIndex === 'number' ? event.resultIndex : 0;
+          for (let i = startIndex; i < event.results.length; i++) {
+            const res = event.results[i];
+            if (res && res[0]) {
+              if (res.isFinal || event.results.length === 1) {
+                const seg = res[0].transcript ? res[0].transcript.trim() : '';
+                if (seg) transcript += (transcript ? ' ' : '') + seg;
+              }
+            }
+          }
+          if (transcript) {
+            const cur = teamChatInput.value;
+            teamChatInput.value = cur ? `${cur} ${transcript}` : transcript;
+            teamChatInput.focus();
+          }
+        };
+
+        speechRecognitionInstance.onerror = (event) => {
+          console.warn('Speech recognition error:', event.error);
+          showToast(`Voice input error: ${event.error}`, 'error');
+          isVoiceRecording = false;
+          btnVoiceMic.classList.remove('recording');
+          btnVoiceMic.title = 'Voice Input';
+        };
+
+        speechRecognitionInstance.onend = () => {
+          isVoiceRecording = false;
+          btnVoiceMic.classList.remove('recording');
+          btnVoiceMic.title = 'Voice Input';
+        };
+
+        speechRecognitionInstance.start();
+      } catch (err) {
+        console.warn('Speech recognition start failed:', err);
+        showToast('Could not start voice recognition: ' + err.message, 'error');
+        isVoiceRecording = false;
+        btnVoiceMic.classList.remove('recording');
+      }
+    });
+  }
 
   if (btnOpenProjectWizard && projectWizardModal) {
     btnOpenProjectWizard.addEventListener('click', () => {
@@ -2020,6 +3391,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize Holographic AI Orb
   if (typeof AiOrb !== 'undefined' && document.getElementById('ai-orb-canvas')) {
     aiOrb = new AiOrb('ai-orb-canvas', { interactive: true });
+    window.agentCrewOrb = aiOrb;
   }
 
   loadProjects();
