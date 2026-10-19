@@ -5,8 +5,15 @@ const { execFile, execSync } = require('child_process');
 class RepoDataService {
   constructor(options = {}) {
     this.repoPath = options.repoPath || process.cwd();
+    this.repoGeneration = 0;
     this.cache = new Map();
     this.cacheTtlMs = options.cacheTtlMs !== undefined ? options.cacheTtlMs : 5000;
+  }
+
+  setRepoRoot(repoPath) {
+    this.repoPath = repoPath;
+    this.repoGeneration++;
+    this.cache.clear();
   }
 
   /**
@@ -121,6 +128,16 @@ class RepoDataService {
       }
     }
 
+    const stateFile = path.join(this.repoPath, '.agentcrew', 'tasks.json');
+    try {
+      const stored = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      if (Array.isArray(stored)) for (const task of stored) {
+        if (!task || !task.id || tasks.some((item) => item.id === task.id)) continue;
+        const status = ({ backlog: 'Backlog', todo: 'To Do', in_progress: 'In Progress', review: 'Review', done: 'Done' })[task.stage] || task.status || 'To Do';
+        tasks.push({ id: task.id, numId: 999, title: task.title || task.id, status, stage: task.stage || 'planning', priority: task.priority || 'medium', owner: task.owner || 'Dev-1', ordinal: 999000 + tasks.length, created_date: task.created_at || null });
+      }
+    } catch (_) {}
+
     // Include any active popups as tasks in the board
     if (Array.isArray(popupTasks)) {
       for (const popup of popupTasks) {
@@ -206,12 +223,13 @@ class RepoDataService {
     };
   }
 
-  async getPullRequestReviewContext(number) {
+  async getPullRequestReviewContext(number, options = {}) {
     const prNumber = Number(number);
     if (!Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error('A valid pull request number is required');
+    const repoPath = options.repoPath || this.repoPath;
     const [details, diff] = await Promise.all([
-      this.execCommand('gh', ['pr', 'view', String(prNumber), '--json', 'number,title,author,body,headRefName,baseRefName']),
-      this.execCommand('gh', ['pr', 'diff', String(prNumber)])
+      this.execCommand('gh', ['pr', 'view', String(prNumber), '--json', 'number,title,author,body,headRefName,baseRefName'], { cwd: repoPath }),
+      this.execCommand('gh', ['pr', 'diff', String(prNumber)], { cwd: repoPath })
     ]);
     if (details.error) throw new Error(`Unable to load PR #${prNumber} details: ${(details.stderr || details.error.message).trim()}`);
     if (diff.error) throw new Error(`Unable to load PR #${prNumber} diff: ${(diff.stderr || diff.error.message).trim()}`);
@@ -236,12 +254,15 @@ class RepoDataService {
    * Query pull requests via `gh` CLI or git log fallback
    */
   async getPullRequests() {
-    const cached = this.cache.get('pullRequests');
+    const repoPath = this.repoPath;
+    const generation = this.repoGeneration;
+    const cacheKey = `${repoPath}:pullRequests`;
+    const cached = this.cache.get(cacheKey);
     if (cached && Date.now() - cached.time < this.cacheTtlMs) {
       return cached.data;
     }
 
-    const repoName = path.basename(this.repoPath);
+    const repoName = path.basename(repoPath);
 
     // Try `gh pr list`
     const ghRes = await this.execCommand('gh', [
@@ -253,7 +274,7 @@ class RepoDataService {
       '30',
       '--json',
       'number,title,author,state,createdAt,additions,deletions,headRefName,body'
-    ]);
+    ], { cwd: repoPath });
 
     let prs = [];
 
@@ -284,39 +305,29 @@ class RepoDataService {
             }
           }
 
-          const openedDate = pr.createdAt ? new Date(pr.createdAt) : new Date();
-          const isToday = pr.createdAt ? pr.createdAt.startsWith(todayStr) : true;
+          const openedDate = pr.createdAt ? new Date(pr.createdAt) : null;
+          const isToday = Boolean(pr.createdAt && pr.createdAt.startsWith(todayStr));
           const { problem, approach } = this.parsePrBodySections(pr.body);
 
-          // Author handle mapping
           const authorLogin = pr.author?.login || 'inegmdev';
-          let mappedAuthor = authorLogin;
-          if (authorLogin === 'inegmdev' || authorLogin === 'inegm') {
-            // Map to autonomous crew identities for dashboard visuals if dev branch
-            if (headBranch.includes('task-29') || headBranch.includes('task-30')) mappedAuthor = 'dev1';
-            else if (headBranch.includes('cli') || headBranch.includes('terminal')) mappedAuthor = 'dev2';
-            else if (headBranch.includes('doc')) mappedAuthor = 'alice';
-            else mappedAuthor = 'dev1';
-          }
-
           return {
             number: pr.number,
             title: pr.title,
-            author: mappedAuthor,
+            author: authorLogin,
             status: { kind, label },
             repository: repoName,
-            opened: openedDate.toLocaleDateString('en-US', {
+            opened: openedDate ? openedDate.toLocaleDateString('en-US', {
               month: 'short',
               day: 'numeric',
               year: 'numeric',
               hour: '2-digit',
               minute: '2-digit'
-            }),
+            }) : 'Unknown',
             age: this.formatRelativeAge(pr.createdAt),
             today: isToday,
             additions: pr.additions || 0,
             deletions: pr.deletions || 0,
-            comments: Math.max(1, (pr.additions % 5) + 1),
+            comments: null,
             branch: headBranch,
             problem,
             approach
@@ -335,7 +346,7 @@ class RepoDataService {
         '-n',
         '10',
         '--pretty=format:%H%x09%an%x09%ad%x09%s%x09%b'
-      ]);
+      ], { cwd: repoPath });
 
       if (!gitMerges.error && gitMerges.stdout.trim()) {
         const lines = gitMerges.stdout.trim().split('\n');
@@ -353,9 +364,9 @@ class RepoDataService {
             opened: 'Recently',
             age: `${index + 1}h`,
             today: true,
-            additions: 150 + index * 40,
-            deletions: 20 + index * 5,
-            comments: 2,
+            additions: 0,
+            deletions: 0,
+            comments: 0,
             branch: `feature/pr-${prNum}`,
             problem: ['PR merged from local branch.'],
             approach: ['Integrated and verified in repo history.']
@@ -364,7 +375,7 @@ class RepoDataService {
       }
     }
 
-    this.cache.set('pullRequests', { data: prs, time: Date.now() });
+    if (generation === this.repoGeneration && repoPath === this.repoPath) this.cache.set(cacheKey, { data: prs, time: Date.now() });
     return prs;
   }
 
@@ -372,18 +383,21 @@ class RepoDataService {
    * Load real repositories and worktrees
    */
   async getRepositories() {
-    const cached = this.cache.get('repositories');
+    const repoPath = this.repoPath;
+    const generation = this.repoGeneration;
+    const cacheKey = `${repoPath}:repositories`;
+    const cached = this.cache.get(cacheKey);
     if (cached && Date.now() - cached.time < this.cacheTtlMs) {
       return cached.data;
     }
 
     const repos = [];
-    const mainRepoName = path.basename(this.repoPath);
+    const mainRepoName = path.basename(repoPath);
 
     // Read package.json description if present
     let description = 'Local AI team workspace — persistent identities, supervisor daemon, interactive dashboards';
     try {
-      const pkgPath = path.join(this.repoPath, 'package.json');
+      const pkgPath = path.join(repoPath, 'package.json');
       if (fs.existsSync(pkgPath)) {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
         if (pkg.description) description = pkg.description;
@@ -391,20 +405,20 @@ class RepoDataService {
     } catch (_) {}
 
     // Git branch
-    const branchRes = await this.execCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const branchRes = await this.execCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoPath });
     const activeBranch = branchRes.stdout.trim() || 'main';
 
     // Git status
-    const statusRes = await this.execCommand('git', ['status', '--porcelain']);
+    const statusRes = await this.execCommand('git', ['status', '--porcelain'], { cwd: repoPath });
     const isClean = statusRes.stdout.trim().length === 0;
     const statusText = isClean ? 'clean' : 'modified';
 
     // Git last commit time
-    const lastCommitRes = await this.execCommand('git', ['log', '-1', '--pretty=format:%cr']);
+    const lastCommitRes = await this.execCommand('git', ['log', '-1', '--pretty=format:%cr'], { cwd: repoPath });
     const lastSync = lastCommitRes.stdout.trim() || 'Just now';
 
     // Git worktrees
-    const wtRes = await this.execCommand('git', ['worktree', 'list']);
+    const wtRes = await this.execCommand('git', ['worktree', 'list'], { cwd: repoPath });
     const wtLines = wtRes.stdout.trim().split('\n').filter(Boolean);
     const worktreesCount = Math.max(1, wtLines.length);
 
@@ -445,7 +459,7 @@ class RepoDataService {
         const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
         if (Array.isArray(state.projects)) {
           for (const proj of state.projects) {
-            if (proj.name && proj.path && proj.path !== this.repoPath && fs.existsSync(proj.path)) {
+            if (proj.name && proj.path && proj.path !== repoPath && fs.existsSync(proj.path)) {
               repos.push({
                 name: proj.name,
                 description: `Registered agentcrew project at ${proj.path}`,
@@ -460,7 +474,7 @@ class RepoDataService {
       }
     } catch (_) {}
 
-    this.cache.set('repositories', { data: repos, time: Date.now() });
+    if (generation === this.repoGeneration && repoPath === this.repoPath) this.cache.set(cacheKey, { data: repos, time: Date.now() });
     return repos;
   }
 
@@ -481,30 +495,33 @@ class RepoDataService {
     const maxConc = scheduler?.maxConcurrency || 4;
     const runningConc = scheduler?.runningCount || 0;
 
-    // Calculate real additions/deletions from PRs or git shortstat
+    // PR additions/deletions are only available from GitHub. Local history is
+    // not enough evidence to attribute line totals to a pull request.
     let totalAdditions = 0;
     let totalDeletions = 0;
     for (const pr of prs) {
       totalAdditions += pr.additions || 0;
       totalDeletions += pr.deletions || 0;
     }
-    if (totalAdditions === 0) {
-      totalAdditions = 44200;
-      totalDeletions = 3934;
-    }
+
+    const metric = (id, label, icon, value, extra = {}) => ({ id, label, icon, value, delta: null, spark: [], ...extra });
+    const completedCount = String(deliveredCount);
+    const cycleTime = this.observedCycleTimeMs;
+    const qaPassRate = this.observedQaPassRate;
+    const concurrency = `${runningConc} / ${maxConc}`;
 
     const kpis = {
       week: [
-        { id: 'cycle-time', label: 'Avg. Cycle Time', icon: 'clock', value: '14.2m', delta: -24, lowerIsBetter: true, spark: [22.4, 19.8, 17.5, 15.6, 14.2] },
-        { id: 'qa-pass', label: 'QA First-Pass Yield', icon: 'check', value: '100%', delta: 5.2, spark: [92.0, 95.0, 97.5, 99.0, 100.0] },
-        { id: 'concurrency', label: 'Peak Concurrency', icon: 'pulse', value: `${runningConc} / ${maxConc}`, delta: 0, spark: [2, 3, 4, 3, 4] },
-        { id: 'delivered', label: 'Tasks Delivered', icon: 'commit', value: `${deliveredCount}`, delta: 18, spark: [12, 18, 22, 26, deliveredCount] }
+        metric('cycle-time', 'Avg. Cycle Time', 'clock', cycleTime == null ? '—' : `${(cycleTime / 60000).toFixed(1)}m`, { lowerIsBetter: true }),
+        metric('qa-pass', 'QA First-Pass Yield', 'check', qaPassRate == null ? '—' : `${(qaPassRate * 100).toFixed(1)}%`),
+        metric('concurrency', 'Peak Concurrency', 'pulse', concurrency),
+        metric('delivered', 'Tasks Delivered', 'commit', completedCount)
       ],
       month: [
-        { id: 'cycle-time', label: 'Avg. Cycle Time', icon: 'clock', value: '16.5m', delta: -18, lowerIsBetter: true, spark: [26.0, 22.5, 19.0, 17.2, 16.5] },
-        { id: 'qa-pass', label: 'QA First-Pass Yield', icon: 'check', value: '98.5%', delta: 8.0, spark: [89.0, 92.5, 95.0, 97.2, 98.5] },
-        { id: 'concurrency', label: 'Peak Concurrency', icon: 'pulse', value: `${runningConc} / ${maxConc}`, delta: 0, spark: [2, 3, 4, 4, 4] },
-        { id: 'delivered', label: 'Tasks Delivered', icon: 'commit', value: `${deliveredCount}`, delta: 35, spark: [8, 15, 20, 25, deliveredCount] }
+        metric('cycle-time', 'Avg. Cycle Time', 'clock', cycleTime == null ? '—' : `${(cycleTime / 60000).toFixed(1)}m`, { lowerIsBetter: true }),
+        metric('qa-pass', 'QA First-Pass Yield', 'check', qaPassRate == null ? '—' : `${(qaPassRate * 100).toFixed(1)}%`),
+        metric('concurrency', 'Peak Concurrency', 'pulse', concurrency),
+        metric('delivered', 'Tasks Delivered', 'commit', completedCount)
       ]
     };
 
