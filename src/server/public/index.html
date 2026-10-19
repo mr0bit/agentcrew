@@ -7,6 +7,7 @@
   <link rel="icon" type="image/jpeg" href="/logo.jpeg">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/vendor/xterm.css">
+  <script src="/ai-orb.js" defer></script>
 </head>
 <body>
   <!-- Dismissible Security Toast Notification -->
@@ -53,6 +54,17 @@
         <span class="needs-input-text"><strong id="needs-input-count">1</strong> needs input</span>
       </div>
     </div>
+
+    <!-- Universal View Switcher Tabs (Option A + LIX style) -->
+    <nav class="topbar-view-tabs" id="topbar-view-nav" aria-label="Application views">
+      <button type="button" class="topbar-view-tab active" data-view="view-team-room" id="tab-nav-cockpit">Cockpit</button>
+      <button type="button" class="topbar-view-tab" data-view="view-overview" id="tab-nav-overview">Overview</button>
+      <button type="button" class="topbar-view-tab" data-view="view-kanban" id="tab-nav-board">Board</button>
+      <button type="button" class="topbar-view-tab" data-view="view-reviews" id="tab-nav-reviews">Reviews</button>
+      <button type="button" class="topbar-view-tab" data-view="view-repositories" id="tab-nav-repos">Repos</button>
+      <button type="button" class="topbar-view-tab" data-view="view-observability" id="tab-nav-metrics">Metrics</button>
+      <button type="button" class="topbar-view-tab" data-view="view-settings" id="tab-nav-settings">Settings</button>
+    </nav>
 
     <div class="topbar-right">
       <div class="topbar-search-box">
@@ -561,35 +573,45 @@
 
               <!-- Main Slack-Like / Tool Stream Conversational Panel -->
               <div id="panel-chat-view" class="agent-tab-panel active">
+                <!-- Interactive Holographic AI Orb Hero Stage (LIX Aesthetic) -->
+                <div class="cockpit-orb-hero" id="cockpit-orb-hero">
+                  <div class="orb-canvas-wrapper" id="orb-canvas-wrapper" title="Click or drag to interact with the holographic AI intelligence orb">
+                    <canvas id="ai-orb-canvas" width="160" height="160" class="ai-orb-canvas"></canvas>
+                  </div>
+                  <div class="orb-hero-headings">
+                    <h2 class="orb-hero-title" id="orb-hero-title">Good morning, Alex.</h2>
+                    <p class="orb-hero-subtitle" id="orb-hero-subtitle">AgentCrew is synchronized.</p>
+                    <div class="orb-hero-badge" id="orb-hero-badge">
+                      <span class="dot-emerald">●</span>
+                      <span id="orb-status-text">IDLE · STANDBY</span>
+                    </div>
+                  </div>
+                </div>
+
                 <div class="room-chat-feed agentsroom-feed" id="team-room-chat-feed" aria-label="Slack-like team chat feed">
                   <!-- Stream populated by app.js with messages, tool cards, and metrics -->
                 </div>
 
-                <!-- Floating Rich Prompt Box (TASK-44, matching agentsroom.png) -->
+                <!-- Floating Rich Prompt Box (LIX Console Style) -->
                 <div class="agentsroom-composer" id="agentsroom-composer">
                   <div class="composer-header-tools">
                     <button class="composer-mini-tool" title="Expand Composer" type="button">⤢</button>
                     <button class="composer-mini-tool" title="Code Editor" type="button">⌸</button>
                   </div>
-                  <textarea id="team-chat-input" class="composer-textarea" placeholder="Give your agent a prompt or a task: Enter to send, Shift+Enter for new line" rows="2" aria-label="Agent prompt input"></textarea>
+                  <textarea id="team-chat-input" class="composer-textarea" placeholder="Ask AgentCrew to code, review, or orchestrate... (Enter to send, Shift+Enter for new line)" rows="2" aria-label="Agent prompt input"></textarea>
                   <div class="composer-toolbar">
                     <div class="composer-tools-left">
-                      <button type="button" class="tool-chip" title="Tag / Topic">🏷️</button>
-                      <button type="button" class="tool-chip" title="Context Selection">✂</button>
+                      <button type="button" class="tool-chip" title="Tools">+ Tools</button>
+                      <button type="button" class="tool-chip" title="Context Selection">+ Context</button>
                       <button type="button" class="tool-chip" title="Insert Code">&lt;/&gt;</button>
-                      <button type="button" class="tool-chip" title="Device Test">📱</button>
                       <button type="button" class="tool-chip" title="Docs & Knowledge">📖</button>
-                      <button type="button" class="tool-chip" title="Prompt History">🕒</button>
                     </div>
                     <div class="composer-tools-right">
                       <div class="voice-controls-pill">
-                        <button type="button" class="voice-btn" title="Waveform Audio"><span class="icon">📶</span></button>
                         <button type="button" class="voice-btn mic-btn" title="Voice Input"><span class="icon">🎙️</span></button>
                       </div>
-                      <button type="button" class="tool-chip" title="Schedule">🕒</button>
-                      <button type="button" class="tool-chip" title="Queue">☰</button>
-                      <button type="button" class="composer-send-btn" id="btn-send-chat" title="Send (Enter)">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                      <button type="button" class="composer-send-btn" id="btn-send-chat" title="Send (Enter)" aria-label="Send message">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
                       </button>
                     </div>
                   </div>

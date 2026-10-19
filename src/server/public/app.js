@@ -44,6 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let liveAgents = [];
   let selectedAgentName = '';
   let activeAgentFilter = 'all';
+  let aiOrb = null;
 
   function formatToolChatText(text) {
     if (!text) return '';
@@ -300,6 +301,9 @@ document.addEventListener('DOMContentLoaded', () => {
       else t.removeAttribute('aria-current');
     });
     document.body.classList.toggle('in-team-room', targetViewId === 'view-team-room');
+    document.querySelectorAll('.topbar-view-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.view === targetViewId);
+    });
     if (mobileViewTitle) mobileViewTitle.textContent = viewLabels[targetViewId] || 'AgentCrew';
     if (mobileMoreBtn) {
       const secondaryViews = ['view-repositories', 'view-observability', 'view-settings'];
@@ -324,6 +328,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   navTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      switchView(tab.dataset.view);
+    });
+  });
+
+  document.querySelectorAll('.topbar-view-tab').forEach(tab => {
     tab.addEventListener('click', () => {
       switchView(tab.dataset.view);
     });
@@ -1179,6 +1189,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (concDisplay) {
         concDisplay.textContent = `${data.running} / ${data.max}`;
       }
+      if (aiOrb) {
+        aiOrb.setActivity(data.running > 0 ? 0.85 : 0.0);
+      }
+      const orbStatusText = document.getElementById('orb-status-text');
+      if (orbStatusText) {
+        orbStatusText.textContent = data.running > 0 ? `WORKING · ${data.running} TURNS` : 'IDLE · STANDBY';
+      }
     });
 
     sse.addEventListener('takeover_quiesced', (e) => {
@@ -1998,6 +2015,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // Select first PR initially for rich display
   if (analyticsData.pullRequests.length > 0 && window.matchMedia('(min-width: 1181px)').matches) {
     selectPR(analyticsData.pullRequests[0]);
+  }
+
+  // Initialize Holographic AI Orb
+  if (typeof AiOrb !== 'undefined' && document.getElementById('ai-orb-canvas')) {
+    aiOrb = new AiOrb('ai-orb-canvas', { interactive: true });
   }
 
   loadProjects();
