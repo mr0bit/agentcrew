@@ -545,10 +545,10 @@
                   <button class="header-action-btn" title="More Options" type="button">⋮</button>
                   <button class="btn-close-cockpit" id="btn-close-cockpit" type="button" title="Close workspace">✕ Close</button>
 
-                  <!-- Hidden elements to preserve test & takeover contracts -->
-                  <span id="takeover-state-badge" class="badge" hidden>Auto</span>
-                  <button id="btn-takeover" class="btn btn-sm btn-primary" type="button" hidden>Take over</button>
-                  <button id="btn-release" class="btn btn-sm btn-secondary" type="button" disabled hidden>Release</button>
+                  <!-- Takeover & human-in-the-loop controls -->
+                  <span id="takeover-state-badge" class="badge">Auto</span>
+                  <button id="btn-takeover" class="btn btn-sm btn-primary" type="button">Take over</button>
+                  <button id="btn-release" class="btn btn-sm btn-secondary" type="button" disabled>Release</button>
                 </div>
               </header>
 
@@ -1060,7 +1060,7 @@
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
                 </div>
                 <div>
-                  <h4 style="margin:0 0 0.25rem 0;">Human Operator</h4>
+                  <h4 style="margin:0 0 0.25rem 0;" id="settings-operator-name">Human Operator</h4>
                   <p style="margin:0; font-size:0.82rem; color:var(--text-muted);">operator@agentcrew.local · Lead Admin</p>
                 </div>
               </div>

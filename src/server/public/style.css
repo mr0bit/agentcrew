@@ -5268,3 +5268,245 @@ button.topbar-user-profile:focus-visible {
 .agent-roster-panel.collapsed {
   display: none !important;
 }
+
+/* --- Phase 6 & Deep Adversarial Audit: Split View, Cockpit Actions & Glass UI --- */
+
+/* Cockpit Split View (Side-by-side Chat & PTY Terminal) */
+body.cockpit-split-view .agentsroom-workspace-card {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: stretch !important;
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+body.cockpit-split-view #panel-chat-view,
+body.cockpit-split-view #panel-terminal-view {
+  display: flex !important;
+  flex: 1 1 50% !important;
+  max-width: 50% !important;
+  width: 50% !important;
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+body.cockpit-split-view #panel-chat-view {
+  border-right: 1px solid rgba(56, 189, 248, 0.2);
+}
+
+/* Collapsed Dock Rail */
+#dock-rail-right.collapsed {
+  width: 28px !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  overflow: hidden !important;
+  padding: 4px 0 !important;
+}
+
+#dock-rail-right.collapsed .dock-item-label,
+#dock-rail-right.collapsed .dock-header span {
+  display: none !important;
+}
+
+/* Cockpit Actions: Dialog Buttons */
+#shared-dialog-body button:not(.btn) {
+  background: rgba(30, 41, 59, 0.85);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: #f1f5f9;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+  margin: 4px 6px 4px 0;
+}
+
+#shared-dialog-body button:not(.btn):hover {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: rgba(56, 189, 248, 0.6);
+  color: #38bdf8;
+  transform: translateY(-1px);
+}
+
+#shared-dialog-body button:not(.btn):active {
+  transform: translateY(0);
+}
+
+/* Cockpit & Pin Badges */
+.cockpit-pin-badge,
+.pin-badge {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Cockpit Field Inputs */
+.cockpit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.cockpit-field label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+}
+
+.cockpit-field input,
+.cockpit-field textarea,
+.cockpit-field select {
+  background: rgba(14, 18, 27, 0.85);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #f1f5f9;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.cockpit-field input:focus,
+.cockpit-field textarea:focus,
+.cockpit-field select:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+/* Cockpit Code / Pre Elements */
+.cockpit-pre,
+.cockpit-data {
+  background: #060911;
+  border: 1px solid rgba(56, 189, 248, 0.15);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-family: var(--font-mono, "JetBrains Mono", monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: #38bdf8;
+  overflow-x: auto;
+  max-height: 320px;
+  margin: 8px 0;
+}
+
+/* Cockpit Messages & Inline Errors */
+.cockpit-message {
+  padding: 8px 12px;
+  background: rgba(18, 24, 38, 0.6);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+  border-radius: 6px;
+  margin-bottom: 6px;
+}
+
+.cockpit-message strong {
+  display: block;
+  font-size: 12px;
+  color: #38bdf8;
+  margin-bottom: 2px;
+}
+
+.cockpit-message p {
+  margin: 0;
+  font-size: 13px;
+  color: #e2e8f0;
+}
+
+.cockpit-message small {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.cockpit-inline-error {
+  color: #ef4444;
+  font-size: 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 4px;
+  padding: 6px 10px;
+  margin: 6px 0;
+}
+
+.cockpit-toast {
+  background: rgba(15, 23, 42, 0.95);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #f1f5f9;
+  border-radius: 8px;
+  padding: 10px 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Scope Changes (P-xxx) Tickets */
+.popup-item {
+  background: rgba(18, 24, 38, 0.7);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.popup-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.popup-ticket-id {
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+  color: #f59e0b;
+}
+
+.popup-item-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* Repos Empty State */
+.repos-empty-state {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-muted, #94a3b8);
+  font-style: italic;
+  font-size: 14px;
+  grid-column: 1 / -1;
+}
+
+/* Chat Streaming Delta */
+.chat-streaming-delta {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: #38bdf8;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(6, 9, 17, 0.7);
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  margin-top: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}

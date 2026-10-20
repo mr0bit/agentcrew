@@ -40,6 +40,8 @@ class SupervisorServer {
     this.workspace = options.workspace;
     this.projectId = options.projectId || null;
     this.activeProjectId = this.projectId;
+    this.inFlightMutations = 0;
+    this.pendingRoomDispatches = new Set();
     this.projectName = options.projectName || 'AgentCrew Workspace';
     this.scheduler = options.scheduler || new TurnScheduler({ maxConcurrency: 4 });
     this.takeoverController = options.takeoverController || new TakeoverController();
@@ -118,6 +120,12 @@ class SupervisorServer {
   }
 
   async handleUpgrade(req, socket, head) {
+    const entryProjectId = this.activeProjectId || this.projectId;
+    if (this.projectSwitching) {
+      socket.write('HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nProject switch in progress');
+      socket.destroy();
+      return;
+    }
     const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (!this.isSameOrigin(req)) {
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
@@ -126,7 +134,12 @@ class SupervisorServer {
     }
     if (parsedUrl.pathname === '/api/v1/pty') {
       const requestedAgentId = parsedUrl.searchParams.get('agent_id') || parsedUrl.searchParams.get('agent') || 'Dev-1';
-      const agentId = (await this.chatService.resolveAgent(requestedAgentId)).name;
+      this.inFlightMutations++;
+      let agentId;
+      try {
+        agentId = (await this.chatService.resolveAgent(requestedAgentId)).name;
+        if (this.rejectProjectAdmission(socket, entryProjectId)) return;
+      } finally { this.inFlightMutations--; }
       const takeoverToken = parsedUrl.searchParams.get('token') || parsedUrl.searchParams.get('takeover_token');
       const mode = parsedUrl.searchParams.get('mode') || (takeoverToken ? 'agent_tui' : 'chat');
       if (!['agent_tui', 'shell'].includes(mode) || !this.takeoverController.validateToken(agentId, takeoverToken)) {
@@ -135,7 +148,11 @@ class SupervisorServer {
         return;
       }
       if (mode === 'agent_tui') {
-        return this.handleAgentTerminalUpgrade(req, socket, agentId, takeoverToken);
+        this.inFlightMutations++;
+        try {
+          if (this.rejectProjectAdmission(socket, entryProjectId)) return;
+          return await this.handleAgentTerminalUpgrade(req, socket, agentId, takeoverToken);
+        } finally { this.inFlightMutations--; }
       }
       const ws = WebSocketConnection.accept(req, socket);
       if (!ws) return;
@@ -290,7 +307,7 @@ class SupervisorServer {
           cwd: this.repoPath,
           which: this.which,
         }).start();
-        owner = { agentId, takeoverToken, terminal, ws: null, provider, fallback: provider !== agent.provider, revoking: false };
+        owner = { agentId, projectId: this.projectId, takeoverToken, terminal, ws: null, provider, fallback: provider !== agent.provider, revoking: false };
         this.agentTerminals.set(agentId, owner);
         terminal.on('exit', ({ exitCode, signal }) => {
           if (owner.ws && !owner.ws.isClosed) owner.ws.send(JSON.stringify({ type: 'exit', exitCode, signal }));
@@ -426,7 +443,7 @@ class SupervisorServer {
 
   broadcastEvent(eventType, data) {
     this.cursorCounter++;
-    const eventData = { ...data, project_id: data?.project_id || this.activeProjectId || this.projectId || null };
+    const eventData = { project_id: this.activeProjectId || this.projectId || null, ...data };
     const payload = `id: ${this.cursorCounter}\nevent: ${eventType}\ndata: ${JSON.stringify(eventData)}\n\n`;
     for (const client of this.sseClients) {
       try {
@@ -464,7 +481,7 @@ class SupervisorServer {
     if (pathname === '/api/v1/health' && method === 'GET') return this.jsonResponse(res, 200, {
       status: 'ok', host: this.host, port: this.httpServer?.address()?.port || this.port,
       project_id: this.activeProjectId || this.projectId || null, repo_path: this.repoPath,
-      scheduler: { running: this.scheduler.activeCount || 0, max_concurrency: this.scheduler.maxConcurrency || 4, paused: Boolean(this.schedulerPaused) },
+      scheduler: { running: this.scheduler.activeCount || 0, max_concurrency: this.scheduler.maxConcurrency || 4, paused: this.schedulerPausedProjects.has(this.activeProjectId || this.projectId) },
       sse_clients: this.sseClients.size, active_ptys: this.agentTerminals ? this.agentTerminals.size : 0,
       uptime_sec: Math.floor(process.uptime())
     });
@@ -494,20 +511,54 @@ class SupervisorServer {
       const filePath = parsedUrl.searchParams.get('path');
       const view = parsedUrl.searchParams.get('view') || 'working';
       if (!['working', 'staged'].includes(view)) return this.jsonResponse(res, 400, { error: 'view must be working or staged' });
+      const root = fs.realpathSync(repoPath);
       let safePath = null;
       if (filePath) {
         if (path.isAbsolute(filePath) || filePath.split(/[\\/]/).includes('..')) return this.jsonResponse(res, 400, { error: 'path must stay inside the repository' });
-        const root = fs.realpathSync(repoPath);
         const target = path.resolve(root, filePath);
-        let canonical;
-        try { canonical = fs.realpathSync(target); } catch (_) { canonical = target; }
-        if (canonical !== root && !canonical.startsWith(root + path.sep)) return this.jsonResponse(res, 400, { error: 'path must stay inside the repository' });
-        safePath = path.relative(root, canonical);
+        const parent = path.dirname(target);
+        let canonicalParent;
+        try { canonicalParent = fs.realpathSync(parent); } catch (_) { canonicalParent = parent; }
+        if (canonicalParent !== root && !canonicalParent.startsWith(root + path.sep)) return this.jsonResponse(res, 400, { error: 'path must stay inside the repository' });
+        safePath = path.relative(root, path.join(canonicalParent, path.basename(target)));
       }
       const args = ['diff', ...(view === 'staged' ? ['--staged'] : []), '--', ...(safePath ? [safePath] : [])];
       const result = await this.repoDataService.execCommand('git', args, { cwd: repoPath });
       if (result.error) return this.jsonResponse(res, 422, { error: result.stderr || result.error.message });
-      const raw = result.stdout || '';
+      let raw = result.stdout || '';
+      if (safePath && view === 'working' && !raw) {
+        const status = await this.repoDataService.execCommand('git', ['status', '--porcelain', '--', safePath], { cwd: repoPath });
+        if ((status.stdout || '').startsWith('??')) {
+          const absolute = path.join(root, safePath);
+          try {
+            const stat = fs.lstatSync(absolute);
+            const canonical = fs.realpathSync(absolute);
+            if (stat.isSymbolicLink() || (canonical !== root && !canonical.startsWith(root + path.sep))) {
+              raw = `Skipped untracked symlink or out-of-repository file: ${safePath}`;
+              return this.jsonResponse(res, 200, { path: filePath || null, view, diff: raw, truncated: false, project_id: projectId });
+            }
+            if (!stat.isFile()) {
+              raw = `Skipped non-regular file: ${safePath}`;
+              return this.jsonResponse(res, 200, { path: filePath || null, view, diff: raw, truncated: false, project_id: projectId });
+            }
+            if (stat.size > 65536) {
+              raw = `Skipped untracked file larger than 64 KB: ${safePath}`;
+              return this.jsonResponse(res, 200, { path: filePath || null, view, diff: raw, truncated: false, project_id: projectId });
+            }
+            const fd = fs.openSync(absolute, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+            let contents;
+            try {
+              const opened = fs.fstatSync(fd);
+              if (!opened.isFile() || opened.size > 65536) throw new Error('File changed or exceeded the 64 KB limit');
+              const buffer = Buffer.alloc(Math.min(opened.size, 65536));
+              const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
+              contents = buffer.subarray(0, bytes).toString('utf8');
+            } finally { fs.closeSync(fd); }
+            const lines = contents.split(/\r?\n/);
+            raw = [`diff --git a/${safePath} b/${safePath}`, 'new file mode 100644', '--- /dev/null', `+++ b/${safePath}`, `@@ -0,0 +1,${lines.length} @@`, ...lines.map((line) => `+${line}`)].join('\n');
+          } catch (_) {}
+        }
+      }
       return this.jsonResponse(res, 200, { path: filePath || null, view, diff: raw.slice(0, 200 * 1024), truncated: raw.length > 200 * 1024, project_id: projectId });
     }
 
@@ -554,7 +605,7 @@ class SupervisorServer {
       let items = [];
       if (collection === 'projects') items = this.workspace ? await this.workspace.listProjects() : [];
       if (collection === 'agents') items = this.workspace && projectId ? await this.workspace.listAgents(projectId) : [];
-      if (collection === 'tasks') items = await this.repoDataService.getBacklogTasks();
+      if (collection === 'tasks') { const combined = [...await this.repoDataService.getBacklogTasks(), ...this.readProjectCollection(projectId, 'tasks')]; const byId = new Map(); for (const task of combined) { const old = byId.get(task.id); if (!old || String(task.updated_at || task.created_at || '') >= String(old.updated_at || old.created_at || '')) byId.set(task.id, task); } items = [...byId.values()]; }
       if (collection === 'jobs') items = [...this.commandJobs.values()].filter((job) => job.project_id === projectId).map(({ child, ...job }) => job);
       if (collection === 'sessions') {
         items = [...(this.chatService.sessionCache || new Map()).entries()].filter(([key]) => key.startsWith(`${projectId}@`) || key.startsWith(`${projectId}:`)).map(([key, value]) => ({ key, provider: value.provider, session_id: value.sessionId, source: 'memory' }));
@@ -619,9 +670,55 @@ class SupervisorServer {
     const activateMatch = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/activate$/);
     if (activateMatch && method === 'POST') {
       const targetId = activateMatch[1];
+      const activationBody = method === 'POST' ? await this.readJsonBody(req).catch(() => ({})) : {};
+      const force = activationBody.force === true || activationBody.force === 'true' || ['1', 'true'].includes((parsedUrl.searchParams.get('force') || '').toLowerCase());
+      const currentProjectId = this.activeProjectId || this.projectId;
+      if (this.projectSwitching || this._activatingProject) return this.jsonResponse(res, 409, { status: 'error', code: 'PROJECT_BUSY', error: 'A project activation is already in progress' });
+      const activeTurnKeys = [...(this.chatService?.activeTurns || new Map()).keys()].filter((key) => key.startsWith(`${currentProjectId}@`));
+      const queuedTurnKeys = (this.scheduler?.queue || []).filter((turn) => turn.agentId?.startsWith(`${currentProjectId}:`));
+      const scheduledActiveKeys = [...(this.scheduler?.activeByAgent || new Map()).keys()].filter((key) => key.startsWith(`${currentProjectId}:`));
+      const pendingDispatches = [...(this.pendingRoomDispatches || new Set())].filter((d) => d.projectId === currentProjectId && !d.cancelled);
+      const ownedAgents = [...(this.takeoverController?.sessions || new Map()).entries()].filter(([, session]) => session.state === 'human_owned').map(([agentId]) => agentId);
+      const projectBusy = this.inFlightMutations > 0 || [...(this.agentTerminals || new Map()).values()].some((owner) => !owner.projectId || owner.projectId === currentProjectId) || [...(this.ptyOwners || new Map()).values()].some((owner) => !owner.projectId || owner.projectId === currentProjectId) || [...(this.commandJobs || new Map()).values()].some((job) => job.project_id === currentProjectId && job.processAlive) || activeTurnKeys.length > 0 || queuedTurnKeys.length > 0 || scheduledActiveKeys.length > 0 || pendingDispatches.length > 0 || ownedAgents.length > 0;
+      if (this.inFlightMutations > 0 || (!force && projectBusy)) return this.jsonResponse(res, 409, { status: 'error', code: 'PROJECT_BUSY', error: 'Current project has active work' });
+      this._activatingProject = targetId;
+      this.projectSwitching = true;
       try {
         if (!this.workspace) {
           return this.jsonResponse(res, 500, { error: 'Workspace manager not initialized' });
+        }
+        if (force && currentProjectId) {
+          for (const d of pendingDispatches) d.cancelled = true;
+          for (const [agentId, owner] of [...this.agentTerminals]) {
+            if (owner.projectId && owner.projectId !== currentProjectId) continue;
+            if (!await owner.terminal.terminateTree().catch(() => false)) throw Object.assign(new Error(`Could not stop agent terminal for ${agentId}`), { statusCode: 409, code: 'PROJECT_BUSY' });
+            owner.ws?.close(); this.agentTerminals.delete(agentId);
+          }
+          for (const [sessionId, owner] of [...this.ptyOwners]) {
+            if (owner.projectId && owner.projectId !== currentProjectId) continue;
+            if (!await owner.ptySession.terminateTree().catch(() => false)) throw Object.assign(new Error(`Could not stop PTY session ${sessionId}`), { statusCode: 409, code: 'PROJECT_BUSY' });
+            owner.ws?.close(); this.ptyOwners.delete(sessionId);
+          }
+          for (const job of this.commandJobs.values()) if (job.project_id === currentProjectId && job.processAlive) {
+            await this.terminateCommandJob(job, 'Project activation forced');
+            if (job.processAlive) throw Object.assign(new Error('Could not stop active command job'), { statusCode: 409, code: 'PROJECT_BUSY' });
+          }
+          const roster = await this.workspace.listAgents(currentProjectId);
+          for (const agent of roster) {
+            const schedulerAgentId = `${currentProjectId}:${agent.name}`;
+            this.scheduler?.cancelQueuedForAgent?.(schedulerAgentId);
+            if (activeTurnKeys.some((key) => key.endsWith(`:${agent.name}`)) || scheduledActiveKeys.includes(schedulerAgentId) || pendingDispatches.some((d) => d.agentId === agent.name)) {
+              let stopped;
+              try { stopped = await this.chatService.quiesceAgent(agent.name, { projectId: currentProjectId, timeoutMs: 10000 }); }
+              finally { this.scheduler?.releaseAgent(schedulerAgentId); }
+              if (!stopped?.quiescent) throw Object.assign(new Error(`Could not stop active turn for ${agent.name}`), { statusCode: 409, code: 'PROJECT_BUSY' });
+            }
+            if (this.takeoverController.getState(agent.name) === 'human_owned') {
+              try { await this.takeoverController.release({ agentId: agent.name, guidance: 'Released for forced project switch' }); } catch (_) {}
+              this.chatService.resumeAgent(agent.name, { projectId: currentProjectId });
+              this.teamRoom.updateAgentState(agent.name, { state: 'idle', activeTaskId: null });
+            }
+          }
         }
         const project = await this.workspace.activateProject(targetId);
         this.projectId = project.id;
@@ -638,7 +735,7 @@ class SupervisorServer {
         return this.jsonResponse(res, 200, { success: true, project });
       } catch (err) {
         return this.jsonResponse(res, err.statusCode || 400, { error: err.message });
-      }
+      } finally { this.projectSwitching = false; this._activatingProject = null; }
     }
 
     if (pathname === '/api/v1/room/messages' && method === 'GET') {
@@ -662,8 +759,8 @@ class SupervisorServer {
       }
       const includeCleared = parsedUrl.searchParams.get('include_cleared') === '1';
       const visible = includeCleared ? messages : messages.filter((message) => {
-        const agentId = message.sender_name || message.metadata?.agent_id || message.sender_id;
-        const matching = [cutoff.get(`${projectId}:${channel}:${agentId}`), cutoff.get(`${projectId}:${channel}:*`), cutoff.get(`${projectId}:*:${agentId}`), cutoff.get(`${projectId}:*:*`), ...persistedCutoffs.filter((item) => item.agent_id === agentId || item.agent_id === message.sender_id || (item.agent_id === '*' && (!item.channel || item.channel === '*' || item.channel === channel))).map((item) => item.cutoff_at || item.at), ...persistedSqlCutoffs.filter((item) => item.agent_id === agentId || item.agent_id === '*').map((item) => item.cutoff_at)];
+        const identities = [message.sender_name, message.sender_id, message.metadata?.target_agent].filter(Boolean);
+        const matching = [...identities.flatMap((agentId) => [cutoff.get(`${projectId}:${channel}:${agentId}`), cutoff.get(`${projectId}:*:${agentId}`)]), cutoff.get(`${projectId}:${channel}:*`), cutoff.get(`${projectId}:*:*`), ...persistedCutoffs.filter((item) => identities.includes(item.agent_id) || (item.agent_id === '*' && (!item.channel || item.channel === '*' || item.channel === channel))).map((item) => item.cutoff_at || item.at), ...persistedSqlCutoffs.filter((item) => identities.includes(item.agent_id) || item.agent_id === '*').map((item) => item.cutoff_at)];
         const at = matching.filter(Boolean).sort().at(-1);
         return !at || message.created_at > at;
       });
@@ -671,16 +768,21 @@ class SupervisorServer {
     }
 
     if (pathname === '/api/v1/room/messages' && method === 'POST') {
+      const entryProjectId = this.activeProjectId || this.projectId;
+      let mutationAdmitted = false;
       try {
-        const messageProjectId = this.activeProjectId || this.projectId;
-        const messageRepoPath = this.repoPath;
         const body = await this.readJsonBody(req);
+        if (this.rejectProjectAdmission(res, entryProjectId)) return;
+        this.inFlightMutations++;
+        mutationAdmitted = true;
+        const messageProjectId = entryProjectId;
+        const messageRepoPath = this.repoPath;
         if (!this.workspace || !messageProjectId) {
           return this.jsonResponse(res, 400, { error: 'No active project' });
         }
         const message = await this.workspace.addRoomMessage(messageProjectId, {
           channel: body.channel || 'team-activity',
-          senderType: body.sender_type || 'human',
+          senderType: 'human',
           senderId: body.sender_id || 'operator',
           senderName: body.sender_name || 'Operator',
           text: body.text,
@@ -688,53 +790,57 @@ class SupervisorServer {
         });
         this.broadcastEvent('room.message', { ...message, project_id: messageProjectId });
 
-        const mentionMatch = body.text && body.text.match(/@([a-zA-Z0-9_\-]+)/);
-        if (mentionMatch && this.chatService) {
-          const mentioned = mentionMatch[1];
-          const agents = await this.workspace.listAgents(messageProjectId);
-          const targetAgent = agents.find(a => a.name.toLowerCase() === mentioned.toLowerCase() || a.id === mentioned);
-          if (targetAgent) {
-            if (this.schedulerPausedProjects.has(messageProjectId)) {
-              const note = await this.workspace.addRoomMessage(messageProjectId, { channel: body.channel || 'team-activity', senderType: 'system', senderId: 'scheduler', senderName: 'Scheduler', text: `Automatic dispatch to ${targetAgent.name} held because this project's scheduler is paused.`, metadata: { scheduler_paused: true, agent_id: targetAgent.name } });
-              this.broadcastEvent('room.message', { ...note, project_id: messageProjectId });
-              return this.jsonResponse(res, 201, { message, scheduler: 'paused' });
-            }
+        const agents = this.chatService ? await this.workspace.listAgents(messageProjectId) : [];
+        const normalize = (value) => String(value || '').trim().toLowerCase();
+        const rosterNames = [...agents].sort((a, b) => Math.max(b.name.length, b.id.length) - Math.max(a.name.length, a.id.length));
+        const mentionMatches = [];
+        const sourceText = String(body.text || '');
+        for (const match of sourceText.matchAll(/@/g)) {
+          const tail = sourceText.slice(match.index + 1).toLowerCase();
+          let alias = null;
+          const target = rosterNames.find((agent) => (alias = [agent.name, agent.id].find((value) => tail.startsWith(String(value).toLowerCase()) && (!tail[String(value).length] || !/[\w.-]/.test(tail[String(value).length])))) != null);
+          if (target) mentionMatches.push({ target, token: sourceText.slice(match.index, match.index + 1 + alias.length) });
+        }
+        const targets = mentionMatches.length
+          ? mentionMatches.map((match) => match.target)
+          : [agents.find((agent) => normalize(agent.name) === normalize(body.metadata?.target_agent) || normalize(agent.id) === normalize(body.metadata?.target_agent))].filter(Boolean);
+        const uniqueTargets = [...new Map(targets.map((agent) => [agent.id, agent])).values()];
+        let dispatch = { dispatched: false, reason: 'No matching target agent' };
+        if (this.schedulerPausedProjects.has(messageProjectId)) dispatch = { dispatched: false, reason: 'Scheduler is paused' };
+        else if (uniqueTargets.length && this.chatService) {
+          dispatch = { dispatched: true };
+          this.pendingRoomDispatches ||= new Set();
+          for (const targetAgent of uniqueTargets) {
+            const pendingEntry = { projectId: messageProjectId, agentId: targetAgent.name, cancelled: false };
+            this.pendingRoomDispatches.add(pendingEntry);
             setImmediate(async () => {
+              let thinkingStarted = false;
               try {
-                if (this.schedulerPausedProjects.has(messageProjectId)) return;
+                if (pendingEntry.cancelled || this.projectSwitching || (this.activeProjectId || this.projectId) !== messageProjectId || this.schedulerPausedProjects.has(messageProjectId)) return;
+                thinkingStarted = true;
                 this.broadcastEvent('agent.thinking_started', { agent_id: targetAgent.name, project_id: messageProjectId });
-                const prompt = body.text.replace(mentionMatch[0], '').trim() || 'Please follow up on the team discussion.';
-                const answer = await this.chatService.generateResponse(targetAgent.name, prompt, { projectId: messageProjectId, repoPath: messageRepoPath });
-                const replyMessage = await this.workspace.addRoomMessage(messageProjectId, {
-                  channel: body.channel || 'team-activity',
-                  senderType: 'agent',
-                  senderId: targetAgent.id,
-                  senderName: targetAgent.name,
-                  text: answer,
-                  metadata: { in_reply_to: message.id, agent_role: targetAgent.role }
-                });
+                const prompt = mentionMatches.reduce((text, mention) => text.replace(mention.token, ''), String(body.text || '')).trim() || 'Please follow up on the team discussion.';
+                const answer = await this.chatService.generateResponse(targetAgent.name, prompt, { projectId: messageProjectId, repoPath: messageRepoPath, onDelta: (delta) => this.broadcastEvent('agent.delta', { agent_id: targetAgent.name, delta, project_id: messageProjectId }) });
+                if (pendingEntry.cancelled || (this.activeProjectId || this.projectId) !== messageProjectId) return;
+                const replyMessage = await this.workspace.addRoomMessage(messageProjectId, { channel: body.channel || 'team-activity', senderType: 'agent', senderId: targetAgent.id, senderName: targetAgent.name, text: answer, metadata: { in_reply_to: message.id, agent_role: targetAgent.role } });
                 this.broadcastEvent('room.message', { ...replyMessage, project_id: messageProjectId });
               } catch (err) {
-                const errorMessage = await this.workspace.addRoomMessage(messageProjectId, {
-                  channel: body.channel || 'team-activity',
-                  senderType: 'system',
-                  senderId: 'system',
-                  senderName: 'System',
-                  text: `Failed to dispatch turn to ${targetAgent.name}: ${err.message}`,
-                  metadata: { error: true }
-                });
-                this.broadcastEvent('room.message', { ...errorMessage, project_id: messageProjectId });
+                if (!pendingEntry.cancelled) {
+                  const errorMessage = await this.workspace.addRoomMessage(messageProjectId, { channel: body.channel || 'team-activity', senderType: 'system', senderId: 'system', senderName: 'System', text: `Failed to dispatch turn to ${targetAgent.name}: ${err.message}`, metadata: { error: true } });
+                  this.broadcastEvent('room.message', { ...errorMessage, project_id: messageProjectId });
+                }
               } finally {
-                this.broadcastEvent('agent.thinking_ended', { agent_id: targetAgent.name, project_id: messageProjectId });
+                this.pendingRoomDispatches.delete(pendingEntry);
+                if (thinkingStarted) this.broadcastEvent('agent.thinking_ended', { agent_id: targetAgent.name, project_id: messageProjectId });
               }
             });
           }
         }
 
-        return this.jsonResponse(res, 201, { message });
+        return this.jsonResponse(res, 201, { message, ...dispatch });
       } catch (err) {
         return this.jsonResponse(res, err.statusCode || 400, { error: err.message });
-      }
+      } finally { if (mutationAdmitted) this.inFlightMutations--; }
     }
 
     if (pathname === '/api/v1/readiness' && method === 'GET') {
@@ -806,7 +912,8 @@ class SupervisorServer {
       const popupTasks = Array.from(this.popupEngine.popups.values());
       const tasks = await this.repoDataService.getBacklogTasks(popupTasks);
       const projectId = this.activeProjectId || this.projectId || 'default';
-      return this.jsonResponse(res, 200, { tasks: [...tasks, ...this.readProjectCollection(projectId, 'tasks')] });
+      const byId = new Map(); for (const task of [...tasks, ...this.readProjectCollection(projectId, 'tasks')]) { const normalized = { ...task, stage: this.normalizeTaskStage(task.stage) }; const old = byId.get(normalized.id); if (!old || String(normalized.updated_at || normalized.created_at || '') >= String(old.updated_at || old.created_at || '')) byId.set(normalized.id, normalized); }
+      return this.jsonResponse(res, 200, { tasks: [...byId.values()] });
     }
 
     if (pathname === '/api/v1/pull-requests' && method === 'GET') {
@@ -861,25 +968,57 @@ class SupervisorServer {
     }
 
     if (pathname === '/api/v1/commands' && method === 'POST') {
+      const entryProjectId = this.activeProjectId || this.projectId;
       if (!/^application\/json(?:\s*;|\s*$)/i.test(req.headers['content-type'] || '')) {
         return this.jsonResponse(res, 415, { error: 'application/json Content-Type required' });
       }
       const body = await this.readJsonBody(req);
-      return this.handleCommand(body, res);
+      if (this.rejectProjectAdmission(res, entryProjectId)) return;
+      return this.handleCommand(body, res, entryProjectId);
     }
 
     return this.jsonResponse(res, 404, { error: `Route not found: ${pathname}` });
   }
 
-  async handleCommand(body, res) {
-    const commandProjectId = this.activeProjectId || this.projectId;
+  rejectProjectAdmission(target, entryProjectId) {
+    if (this.projectSwitching || (entryProjectId && (this.activeProjectId || this.projectId) !== entryProjectId)) {
+      const payload = { status: 'error', code: 'PROJECT_SWITCH_IN_PROGRESS', error: 'Project switch in progress or active project changed' };
+      if (typeof target?.writeHead === 'function') {
+        this.jsonResponse(target, 409, payload);
+      } else if (target?.write && target?.destroy) {
+        target.write('HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nProject switch in progress or active project changed');
+        target.destroy();
+      }
+      return true;
+    }
+    return false;
+  }
+
+  async handleCommand(body, res, entryProjectId = this.activeProjectId || this.projectId) {
+    if (this.rejectProjectAdmission(res, entryProjectId)) return;
+    const commandProjectId = entryProjectId;
     const commandRepoPath = this.repoPath;
+    if (body?.project_id && body.project_id !== commandProjectId) return this.jsonResponse(res, 409, { status: 'error', code: 'PROJECT_MISMATCH', error: 'Active project changed' });
+    this.commandReceipts ||= new Map();
     if (!body || (!body.command_type && !body.action)) {
       return this.jsonResponse(res, 400, { error: 'Missing command_type or action in request body' });
     }
 
     const command_type = body.command_type || (body.action ? `session.${body.action}` : null);
     const payload = body.payload || body;
+    const receiptKey = body?.idempotency_key ? `${commandProjectId}:${String(body.idempotency_key).slice(0, 200)}` : null;
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ command: command_type, payload, projectId: commandProjectId })).digest('hex');
+    this.commandInFlight ||= new Map();
+    if (receiptKey && this.commandReceipts.has(receiptKey)) {
+      const stored = this.commandReceipts.get(receiptKey);
+      if (stored.fingerprint !== fingerprint) return this.jsonResponse(res, 409, { status: 'error', code: 'IDEMPOTENCY_CONFLICT', error: 'idempotency_key was already used for a different command' });
+      return this.jsonResponse(res, 200, stored.receipt);
+    }
+    if (receiptKey && this.commandInFlight.has(receiptKey)) {
+      const inFlight = this.commandInFlight.get(receiptKey);
+      return this.jsonResponse(res, 409, { status: 'error', code: inFlight.fingerprint === fingerprint ? 'COMMAND_IN_PROGRESS' : 'IDEMPOTENCY_CONFLICT', error: inFlight.fingerprint === fingerprint ? 'An identical command is already in progress' : 'idempotency_key is in use for a different command' });
+    }
+    if (receiptKey) this.commandInFlight.set(receiptKey, { fingerprint });
     const commandId = `cmd-${Date.now()}`;
     const supportedCommands = new Set([
       'agent.provider_config', 'session.takeover', 'session.release', 'session.exec', 'session.command',
@@ -889,11 +1028,13 @@ class SupervisorServer {
       , 'idea.save', 'idea.promote', 'snippet.save', 'snippet.delete', 'task.create', 'task.transition'
     ]);
     if (!supportedCommands.has(command_type)) {
+      if (receiptKey) this.commandInFlight.delete(receiptKey);
       return this.jsonResponse(res, 400, {
         status: 'error', code: 'UNKNOWN_COMMAND', error: `Unsupported command_type: ${command_type}`
       });
     }
 
+    this.inFlightMutations++;
     try {
       let result = null;
 
@@ -904,7 +1045,9 @@ class SupervisorServer {
       } else if (command_type === 'idea.promote') {
         const ideas = this.readProjectCollection(commandProjectId, 'ideas'); const idea = ideas.find((item) => item.id === payload.id);
         if (!idea) throw Object.assign(new Error('Idea not found'), { statusCode: 404 });
-        const task = { id: `task-${crypto.randomUUID()}`, title: idea.title, description: idea.description, stage: 'backlog', created_at: new Date().toISOString(), project_id: commandProjectId };
+        if (idea.promoted_task_id) throw Object.assign(new Error('Idea has already been promoted'), { statusCode: 409 });
+        const task = { id: `task-${crypto.randomUUID()}`, title: idea.title, description: idea.description, stage: 'planning', created_at: new Date().toISOString(), project_id: commandProjectId };
+        idea.promoted_task_id = task.id; this.writeProjectCollection(commandProjectId, 'ideas', ideas);
         this.writeProjectCollection(commandProjectId, 'tasks', [...this.readProjectCollection(commandProjectId, 'tasks'), task]);
         this.persistTaskFile(commandRepoPath, task); this.repoDataService.cache?.clear();
         this.persistTaskFile(commandRepoPath, task);
@@ -918,20 +1061,21 @@ class SupervisorServer {
         if (next.length === snippets.length) throw Object.assign(new Error('Snippet not found'), { statusCode: 404 });
         this.writeProjectCollection(commandProjectId, 'snippets', next); result = { id: payload.id, deleted: true };
       } else if (command_type === 'task.create') {
-        const title = String(payload.title || '').trim(); const stages = ['backlog', 'todo', 'in_progress', 'review', 'done'];
+        const title = String(payload.title || '').trim(); const stages = ['backlog', 'planning', 'todo', 'in_progress', 'review', 'qa', 'done'];
         if (!title || (payload.stage && !stages.includes(payload.stage))) throw Object.assign(new Error('Valid task title and stage are required'), { statusCode: 400 });
-        result = { id: `task-${crypto.randomUUID()}`, title: title.slice(0, 200), description: String(payload.description || '').slice(0, 10000), stage: payload.stage || 'backlog', created_at: new Date().toISOString(), project_id: commandProjectId };
+        result = { id: `task-${crypto.randomUUID()}`, title: title.slice(0, 200), description: String(payload.description || '').slice(0, 10000), stage: this.normalizeTaskStage(payload.stage || 'planning'), created_at: new Date().toISOString(), project_id: commandProjectId };
         this.writeProjectCollection(commandProjectId, 'tasks', [...this.readProjectCollection(commandProjectId, 'tasks'), result]); this.persistTaskFile(commandRepoPath, result); this.repoDataService.cache?.clear();
       } else if (command_type === 'task.transition') {
-        const stages = ['backlog', 'todo', 'in_progress', 'review', 'done'];
+        const stages = ['backlog', 'planning', 'todo', 'in_progress', 'review', 'qa', 'done'];
         if (!stages.includes(payload.stage)) throw Object.assign(new Error('Invalid task stage'), { statusCode: 400 });
+        const nextStage = this.normalizeTaskStage(payload.stage);
         const tasks = this.readProjectCollection(commandProjectId, 'tasks'); const index = tasks.findIndex((task) => task.id === payload.id);
-        const updated = index >= 0 ? { ...tasks[index], stage: payload.stage, updated_at: new Date().toISOString() } : null;
-        const fileTask = this.transitionTaskFile(commandRepoPath, payload.id, payload.stage);
+        const updated = index >= 0 ? { ...tasks[index], stage: nextStage, updated_at: new Date().toISOString() } : null;
+        const fileTask = this.transitionTaskFile(commandRepoPath, payload.id, nextStage);
         if (!updated && !fileTask) throw Object.assign(new Error('Task not found'), { statusCode: 404 });
         if (updated) { tasks[index] = updated; this.writeProjectCollection(commandProjectId, 'tasks', tasks); }
         if (!fileTask && updated) this.persistTaskFile(commandRepoPath, updated);
-        this.repoDataService.cache?.clear(); result = updated || { ...fileTask, stage: payload.stage };
+        this.repoDataService.cache?.clear(); result = updated || { ...fileTask, stage: nextStage };
       } else if (command_type === 'command.run') {
         const catalog = this.getCommandCatalog(true);
         const entry = catalog.find((item) => item.id === payload.job_id);
@@ -977,7 +1121,8 @@ class SupervisorServer {
       } else if (command_type === 'agent.provider_config' || command_type === 'agent.configure') {
         if (!this.workspace || !commandProjectId) throw Object.assign(new Error('Workspace is unavailable'), { statusCode: 503 });
         const agentId = (await this.chatService.resolveAgent(payload.agent_id, { projectId: commandProjectId })).name;
-        if (this.agentTerminals.has(agentId)) throw Object.assign(new Error('Release the active terminal before changing provider settings'), { statusCode: 409 });
+        const activeTurn = [...(this.chatService.activeTurns || new Map()).keys()].some((key) => key.startsWith(`${commandProjectId}@`) && key.endsWith(`:${agentId}`));
+        if (this.agentTerminals.has(agentId) || this.takeoverController?.getState?.(agentId) === 'human_owned' || (command_type === 'agent.configure' && activeTurn)) throw Object.assign(new Error('Agent has active work or terminal'), { statusCode: 409, code: 'AGENT_ACTIVE' });
         if (command_type === 'agent.configure') {
           const { DatabaseSync } = require('node:sqlite');
           const dbPath = path.join(this.workspace.baseDir, 'projects', commandProjectId, 'agentcrew.db');
@@ -1013,14 +1158,17 @@ class SupervisorServer {
         result = { status: 'unavailable', reason: 'No approved eligible task dispatcher is configured' };
       } else if (command_type === 'message.broadcast') {
         const projectId = commandProjectId;
+        if (this.schedulerPausedProjects.has(projectId)) throw Object.assign(new Error('Scheduler is paused'), { statusCode: 409, code: 'SCHEDULER_PAUSED' });
         const repoPath = commandRepoPath;
         const roster = this.workspace && projectId ? await this.workspace.listAgents(projectId) : [];
         const requested = payload.agent_ids || roster.map((agent) => agent.name);
         const recipients = [...new Set(requested.map((id) => roster.find((agent) => agent.id === id || agent.name.toLowerCase() === String(id).toLowerCase())?.name).filter(Boolean))];
         if (recipients.length !== requested.length || !recipients.length) throw Object.assign(new Error('Every recipient must belong to the active project roster'), { statusCode: 400, code: 'INVALID_RECIPIENT' });
         const messages = [];
-        for (const agentId of recipients.slice(0, 4)) {
+        for (const agentId of recipients) {
           const text = String(payload.text || '').trim(); if (!text) break;
+          const owned = this.agentTerminals.has(agentId) || this.takeoverController?.getState?.(agentId) === 'human_owned';
+          if (owned) { messages.push({ agent_id: agentId, status: 'skipped_human_owned' }); continue; }
           const message = await this.workspace?.addRoomMessage(projectId, { senderType: 'operator', senderId: 'operator', senderName: 'Operator', text: `@${agentId} ${text}`, channel: payload.channel || 'team-activity' });
           if (message) {
             messages.push(message);
@@ -1042,7 +1190,7 @@ class SupervisorServer {
         const key = `${projectId}:${agentId}`;
         this.sessionCutoffs ||= new Map();
         const cutoff = { action: command_type, at: new Date().toISOString() };
-        if (command_type === 'session.reset' && [...(this.chatService.activeTurns || new Map()).keys()].some((activeKey) => activeKey.startsWith(`${projectId}@`) && activeKey.endsWith(`:${agentId}`))) throw Object.assign(new Error('Cannot reset a session while its agent has an active turn'), { statusCode: 409, code: 'SESSION_TURN_ACTIVE' });
+        if (command_type === 'session.reset' && (this.agentTerminals.has(agentId) || this.takeoverController?.getState?.(agentId) === 'human_owned' || [...(this.chatService.activeTurns || new Map()).keys()].some((activeKey) => activeKey.startsWith(`${projectId}@`) && activeKey.endsWith(`:${agentId}`)))) throw Object.assign(new Error('Cannot reset a session while agent has active work or terminal'), { statusCode: 409, code: 'SESSION_ACTIVE' });
         this.sessionCutoffs.set(key, cutoff);
         this.sessionViewCutoffs.set(`${projectId}:team-activity:${agentId}`, cutoff.at);
         const cutoffs = this.readProjectCollection(projectId, 'cutoffs');
@@ -1067,12 +1215,14 @@ class SupervisorServer {
         const file = path.join(this.workspace?.baseDir || path.join(process.cwd(), '.agentcrew'), 'preferences', `${projectId}.json`);
         fs.mkdirSync(path.dirname(file), { recursive: true });
         const current = this.preferences.get(projectId) || (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {});
-        const allowed = ['pins', 'stars', 'tags', 'turbo', 'theme', 'accent'];
+        const allowed = ['pins', 'stars', 'tags', 'turbo', 'theme', 'accent', 'operator_name', 'autoscroll'];
         const updates = Object.fromEntries(Object.entries(payload).filter(([key]) => allowed.includes(key)));
         if ('theme' in updates && !['light', 'dark', 'system'].includes(updates.theme)) throw Object.assign(new Error('Invalid theme preference'), { statusCode: 400 });
         if ('accent' in updates && !['blue', 'violet', 'teal', 'amber'].includes(updates.accent)) throw Object.assign(new Error('Invalid accent preference'), { statusCode: 400 });
         for (const key of ['pins', 'stars', 'tags']) if (key in updates && (!Array.isArray(updates[key]) || updates[key].length > 500)) throw Object.assign(new Error(`${key} must be a bounded array`), { statusCode: 400 });
         if ('turbo' in updates && typeof updates.turbo !== 'boolean') throw Object.assign(new Error('turbo must be a boolean'), { statusCode: 400 });
+        if ('operator_name' in updates && (typeof updates.operator_name !== 'string' || updates.operator_name.length > 100)) throw Object.assign(new Error('operator_name must be a string up to 100 characters'), { statusCode: 400 });
+        if ('autoscroll' in updates && typeof updates.autoscroll !== 'boolean') throw Object.assign(new Error('autoscroll must be a boolean'), { statusCode: 400 });
         const updated = { ...current, ...updates };
         fs.writeFileSync(file, JSON.stringify(updated, null, 2)); this.preferences.set(projectId, updated); result = updated;
       } else if (command_type === 'session.takeover') {
@@ -1088,8 +1238,9 @@ class SupervisorServer {
           status: resObj.status,
           takeover_token: resObj.token || resObj.takeover_token || crypto.randomUUID()
         };
-        this.broadcastEvent('takeover_started', result);
-        this.broadcastEvent('takeover_quiesced', result);
+        const { takeover_token: _privateToken, ...publicTakeover } = result;
+        this.broadcastEvent('takeover_started', publicTakeover);
+        this.broadcastEvent('takeover_quiesced', publicTakeover);
       } else if (command_type === 'session.release') {
         const agentId = (await this.chatService.resolveAgent(payload.agent_id, { projectId: commandProjectId })).name;
         if (!this.takeoverController.validateToken(agentId, payload.takeover_token)) {
@@ -1236,17 +1387,22 @@ class SupervisorServer {
         this.broadcastEvent('agent_answered', result);
       }
 
-      return this.jsonResponse(res, 200, {
+      const receipt = {
         command_id: commandId,
         status: 'acknowledged',
         result
-      });
+      };
+      if (receiptKey) { this.commandReceipts.set(receiptKey, { fingerprint, receipt }); while (this.commandReceipts.size > 200) this.commandReceipts.delete(this.commandReceipts.keys().next().value); }
+      return this.jsonResponse(res, 200, receipt);
     } catch (err) {
       return this.jsonResponse(res, err.statusCode || 500, {
         status: 'error', error: err.message, code: err.code,
         ...(err.exit_code !== undefined ? { exit_code: err.exit_code } : {}),
         ...(err.output ? { output: err.output } : {})
       });
+    } finally {
+      this.inFlightMutations--;
+      if (receiptKey) this.commandInFlight.delete(receiptKey);
     }
   }
 
@@ -1279,7 +1435,12 @@ class SupervisorServer {
   }
 
   taskStatus(stage) {
-    return ({ backlog: 'Backlog', todo: 'To Do', in_progress: 'In Progress', review: 'Review', done: 'Done' })[stage] || 'To Do';
+    return ({ backlog: 'Backlog', planning: 'Planning', todo: 'To Do', in_progress: 'In Progress', review: 'Review', qa: 'QA', done: 'Done' })[stage] || 'To Do';
+  }
+
+  normalizeTaskStage(stage) {
+    if (stage === 'backlog' || stage === 'todo') return 'planning';
+    return ['planning', 'in_progress', 'review', 'qa', 'done'].includes(stage) ? stage : 'planning';
   }
 
   persistTaskFile(repoPath, task) {
@@ -1311,9 +1472,11 @@ class SupervisorServer {
       const fields = Object.fromEntries(match[1].split(/\r?\n/).map((line) => { const at = line.indexOf(':'); return at < 0 ? ['', ''] : [line.slice(0, at).trim(), line.slice(at + 1).trim().replace(/^['"]|['"]$/g, '')]; }));
       if (fields.id !== id) continue;
       const status = this.taskStatus(stage);
-      const updated = match[1].match(/^status:.*$/m) ? match[1].replace(/^status:.*$/m, `status: ${JSON.stringify(status)}`) : `${match[1]}\nstatus: ${JSON.stringify(status)}`;
+      const updatedAt = new Date().toISOString();
+      let updated = match[1].match(/^status:.*$/m) ? match[1].replace(/^status:.*$/m, `status: ${JSON.stringify(status)}`) : `${match[1]}\nstatus: ${JSON.stringify(status)}`;
+      updated = /^updated_at:.*$/m.test(updated) ? updated.replace(/^updated_at:.*$/m, `updated_at: ${JSON.stringify(updatedAt)}`) : `${updated}\nupdated_at: ${JSON.stringify(updatedAt)}`;
       fs.writeFileSync(file, content.replace(match[1], updated));
-      return { id, title: fields.title, created_at: fields.created_at };
+      return { id, title: fields.title, created_at: fields.created_at, updated_at: updatedAt };
     }
     return null;
   }

@@ -438,3 +438,10 @@ Added `test/server/phase6-full-functionality.test.js`, an acceptance suite for
 disposable Git repositories, working/staged diffs, repository context, named job
 execution and cancellation, roster/scheduler/content/preference commands, project
 isolation, diagnostics, and static assets. Node 24 targeted run passes (6/6).
+Fixed three backend project-switch/task-stage blockers: forced quiesce releases scoped scheduler holds, commands/room posts/PTY upgrades reject during teardown, and legacy backlog/todo stages normalize to planning across fallback, merged tasks, create, and promotion. Added regressions in HTTP API and Phase 6 suites; syntax checks pass. Existing UI and unrelated worktree edits preserved.
+
+Closed the remaining project-switch admission race: command and room POSTs pin the
+entry project before body parsing, recheck after parsing, and contribute to an
+in-flight mutation count until completion. PTY upgrades recheck project identity
+after async agent resolution; project activation rejects while any admitted mutation
+is in flight. Added an HTTP API regression for a project change during body parsing.

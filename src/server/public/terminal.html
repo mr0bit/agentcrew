@@ -93,8 +93,8 @@
       <span class="term-title" id="agent-title">Agent Terminal</span>
     </div>
     <div class="term-status">
-      <span class="status-dot" id="status-dot"></span>
-      <span id="status-label">Connected</span>
+      <span class="status-dot disconnected" id="status-dot"></span>
+      <span id="status-label">Connecting…</span>
     </div>
   </div>
   <div class="term-container">
@@ -114,6 +114,16 @@
         try {
           const stored = JSON.parse(sessionStorage.getItem('agentcrew.takeoverTokens') || '{}');
           if (stored[agentId]) token = stored[agentId];
+        } catch (_) {}
+      }
+
+      // Strip token from URL so credentials are not exposed in history or referrers
+      if (token) {
+        try {
+          const cleanUrl = new URL(window.location.href);
+          cleanUrl.searchParams.delete('token');
+          cleanUrl.searchParams.delete('takeover_token');
+          window.history.replaceState(null, '', cleanUrl.pathname + cleanUrl.search);
         } catch (_) {}
       }
 
@@ -147,9 +157,14 @@
         try { fitAddon.fit(); } catch (_) {}
       }
 
+      let ws = null;
+
       window.addEventListener('resize', () => {
         if (fitAddon) {
           try { fitAddon.fit(); } catch (_) {}
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
         }
       });
 
@@ -181,11 +196,10 @@
 
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/pty?mode=agent_tui&agent_id=${encodeURIComponent(agentId)}&token=${encodeURIComponent(token)}`;
-      const ws = new WebSocket(wsUrl);
+      ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        statusDot.classList.remove('disconnected');
-        statusLabel.textContent = 'Connected (Live PTY)';
+        statusLabel.textContent = 'Connecting (handshake)...';
         if (fitAddon) fitAddon.fit();
         ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
       };
@@ -215,7 +229,7 @@
 
       ws.onerror = () => {
         statusDot.classList.add('disconnected');
-        statusLabel.textContent = 'Connection Error';
+        statusLabel.textContent = 'Disconnected';
       };
 
       term.onData((data) => {

@@ -29,7 +29,7 @@ function loadBrowser(fetchImpl = async () => ({ ok: true, status: 200, json: asy
     remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(x => x !== this); }
     get textContent() { return this._text !== undefined ? this._text : this.children.map(x => x.textContent || '').join(''); }
     set textContent(v) { this._text = String(v); this.children = []; }
-    matches(selector) { return selector.split(',').some(s => { s = s.trim(); if (s.includes('#view-kanban') && (s.includes('.task-card') || s.includes('.task-item'))) return (this.classList.contains('task-card') || this.classList.contains('task-item')) && !!this.closest('#view-kanban'); if (s.includes('[id^=tasks-]')) return /^tasks-/.test(this.id || ''); if (s.includes('[id^=col-]')) return /^col-/.test(this.id || ''); if (s.includes('.agent-workspace-actions') && s.includes('Copy Output')) return this.tagName === 'BUTTON' && this.title === 'Copy Output'; if (s.startsWith('#')) return this.id === s.slice(1); if (s.startsWith('.')) return this.classList.contains(s.slice(1)); if (s === 'button') return this.tagName === 'BUTTON'; return this.tagName === s.toUpperCase(); }); }
+    matches(selector) { return selector.split(',').some(s => { s = s.trim(); if (s.includes('#view-kanban') && (s.includes('.task-card') || s.includes('.task-item'))) return (this.classList.contains('task-card') || this.classList.contains('task-item')) && !!this.closest('#view-kanban'); if (s.includes('[id^=tasks-]')) return /^tasks-/.test(this.id || ''); if (s.includes('[id^=col-]')) return /^col-/.test(this.id || ''); if (s.includes('.agent-workspace-actions') && (s.includes('Copy Output') || s.includes('Share via Email'))) return this.tagName === 'BUTTON' && this.title === (s.includes('Copy Output') ? 'Copy Output' : 'Share via Email'); if (s.startsWith('#')) return this.id === s.slice(1); if (s.startsWith('.')) return this.classList.contains(s.slice(1)); if (s === 'button') return this.tagName === 'BUTTON'; return this.tagName === s.toUpperCase(); }); }
     closest(selector) { for (let n = this; n; n = n.parentNode) if (n.matches(selector) || (selector.includes('.task-card') && n.classList.contains('task-card')) || (selector.includes('.task-item') && n.classList.contains('task-item')) || (selector.includes('.agentsroom-agent-card') && n.classList.contains('agentsroom-agent-card'))) return n; return null; }
     querySelector(selector) { return all(this).find(n => n.matches(selector)) || null; }
     querySelectorAll(selector) { return all(this).filter(n => n.matches(selector)); }
@@ -49,6 +49,16 @@ function loadBrowser(fetchImpl = async () => ({ ok: true, status: 200, json: asy
   vm.createContext(context); vm.runInContext(source, context, { filename: 'cockpit-actions.js' });
   return { context, document, listeners: document.events, Node, kanban, get eventSource() { return eventSource; } };
 }
+
+test('cockpit actions wires accessible ideas/backlog, refreshes views, and uses the five board stages', () => {
+  assert.match(source, /#btn-open-backlog, #btn-open-ideas/);
+  assert.match(source, /node\.tabIndex = 0; node\.setAttribute\('role', 'button'\)/);
+  assert.match(source, /agentcrew:roster-rendered/);
+  assert.match(source, /include_cleared=1/);
+  assert.match(source, /const STAGES = \['planning', 'in_progress', 'review', 'qa', 'done'\]/);
+  assert.match(source, /agentCrewRefreshTasks/);
+  assert.match(source, /refreshCounts\(\)/);
+});
 
 test('cockpit actions parses and exports initializer without unsafe HTML sinks', () => {
   assert.doesNotThrow(() => new vm.Script(source));
@@ -127,4 +137,18 @@ test('New Task button submits task.create', async () => {
   const fields = document.querySelector('#shared-dialog-body').querySelectorAll('input, textarea');
   fields[0].value = 'Test task'; fields[1].value = 'Description'; await create.click();
   assert.equal(commands[0].command_type, 'task.create'); assert.deepEqual(commands[0].payload, { title: 'Test task', description: 'Description' });
+});
+
+test('Share transcript fetches room messages and opens export options without recursive overflow', async () => {
+  const calls = [];
+  const browser = loadBrowser(async url => { calls.push(url); return { ok: true, status: 200, json: async () => url.startsWith('/api/v1/room/messages') ? { messages: [{ text: 'hello', sender_name: 'Dev-1' }] } : { preferences: {} } }; });
+  const { context, listeners, document, Node } = browser;
+  listeners.DOMContentLoaded[0]();
+  const actions = new Node(); actions.className = 'agent-workspace-actions';
+  const share = new Node('button'); share.title = 'Share via Email'; actions.append(share); document.body.append(actions);
+  await assert.doesNotReject(listeners.click[0]({ target: share }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(calls.some(url => url.startsWith('/api/v1/room/messages')));
+  assert.equal(document.querySelector('#shared-dialog-title').textContent, 'Share & Export');
+  assert.ok(document.querySelector('#shared-dialog-body').textContent.includes('1 messages loaded.'));
 });

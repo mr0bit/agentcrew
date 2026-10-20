@@ -135,6 +135,11 @@ document.addEventListener('DOMContentLoaded', () => {
     msgEl.className = `chat-msg ${isAgentMsg ? 'agent' : 'human'}`;
     if (msgId) msgEl.dataset.messageId = msgId;
 
+    if (typeof messageOrSender === 'object' && messageOrSender !== null) {
+      const clientTurnId = messageOrSender.client_turn_id || messageOrSender.metadata?.turn_id || messageOrSender.metadata?.client_turn_id || messageOrSender.turn_id;
+      if (clientTurnId) msgEl.dataset.clientTurnId = clientTurnId;
+    }
+
     const safeSender = escapeHtml(sender);
     const safeInitial = escapeHtml(initial);
     const safeTime = escapeHtml(timeStr);
@@ -158,7 +163,8 @@ document.addEventListener('DOMContentLoaded', () => {
     `;
 
     teamRoomChatFeed.appendChild(msgEl);
-    if (localStorage.getItem('agentcrew-autoscroll') !== 'false') {
+    const autoscrollPref = localStorage.getItem('agentcrew-pref-autoscroll') ?? localStorage.getItem('agentcrew_autoscroll') ?? localStorage.getItem('agentcrew-autoscroll');
+    if (autoscrollPref !== 'false') {
       teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
     }
     return msgEl;
@@ -182,6 +188,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <div class="chat-paragraph">
           Processing request<span class="thinking-dots"><span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span></span>
         </div>
+        <div id="chat-streaming-delta" class="chat-streaming-delta" hidden></div>
       </div>
     `;
     teamRoomChatFeed.appendChild(item);
@@ -770,7 +777,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const prs = analyticsData.pullRequests.filter(pr => {
       if (filter === 'all') return true;
-      return pr.status.kind === filter;
+      const kind = pr.status?.kind || pr.status || pr.state || 'open';
+      return kind === filter;
     });
 
     prs.forEach(pr => {
@@ -784,11 +792,13 @@ document.addEventListener('DOMContentLoaded', () => {
       card.dataset.number = pr.number;
       card.setAttribute('aria-label', `Open pull request ${pr.number}: ${pr.title}`);
 
-      const statusBadgeClass = pr.status?.kind === 'merged' ? 'badge-success' : (pr.status?.kind === 'review' ? 'badge-warning' : '');
+      const statusKind = pr.status?.kind || pr.status || pr.state || 'open';
+      const statusLabel = pr.status?.label || pr.status || pr.state || 'open';
+      const statusBadgeClass = statusKind === 'merged' ? 'badge-success' : (statusKind === 'review' ? 'badge-warning' : '');
 
       card.innerHTML = `
         <div class="pr-card-header">
-          <span class="badge ${escapeHtml(statusBadgeClass)}">${escapeHtml(pr.status?.label || '')}</span>
+          <span class="badge ${escapeHtml(statusBadgeClass)}">${escapeHtml(statusLabel)}</span>
           <span style="font-size:0.75rem; color:var(--text-muted);">${escapeHtml(pr.age || '')} ago</span>
         </div>
         <div class="pr-title-text">${escapeHtml(pr.title || '')}</div>
@@ -826,15 +836,16 @@ document.addEventListener('DOMContentLoaded', () => {
       avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${pr.author}`
     };
 
-    document.getElementById('pr-panel-title').textContent = pr.title;
-    document.getElementById('pr-panel-status').textContent = pr.status.label;
-    document.getElementById('pr-panel-opened').textContent = `Opened ${pr.opened}`;
+    const statusLabel = typeof pr.status === 'object' ? (pr.status?.label || pr.status?.name || 'open') : (pr.status || pr.state || 'open');
+    document.getElementById('pr-panel-title').textContent = pr.title || '';
+    document.getElementById('pr-panel-status').textContent = statusLabel;
+    document.getElementById('pr-panel-opened').textContent = pr.opened ? `Opened ${pr.opened}` : '';
     document.getElementById('pr-panel-author-avatar').src = author.avatar;
-    document.getElementById('pr-panel-author-handle').textContent = `@${pr.author} (${author.name})`;
-    document.getElementById('pr-panel-repo').textContent = pr.repository;
-    document.getElementById('pr-panel-additions').textContent = `+${pr.additions}`;
-    document.getElementById('pr-panel-deletions').textContent = `-${pr.deletions}`;
-    document.getElementById('pr-panel-comments').textContent = `${pr.comments} comments`;
+    document.getElementById('pr-panel-author-handle').textContent = `@${pr.author || 'unknown'} (${author.name})`;
+    document.getElementById('pr-panel-repo').textContent = pr.repository || '';
+    document.getElementById('pr-panel-additions').textContent = `+${pr.additions || 0}`;
+    document.getElementById('pr-panel-deletions').textContent = `-${pr.deletions || 0}`;
+    document.getElementById('pr-panel-comments').textContent = `${pr.comments ?? 0} comments`;
 
     const probEl = document.getElementById('pr-panel-problem');
     const problems = Array.isArray(pr.problem) ? pr.problem : [pr.problem || 'No description provided.'];
@@ -900,13 +911,6 @@ document.addEventListener('DOMContentLoaded', () => {
     prPanelBackdrop.addEventListener('click', closePRPanel);
   }
 
-  // Escape key closes panel
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && selectedPR) {
-      closePRPanel();
-    }
-  });
-
   // Filter Pills click
   document.querySelectorAll('#pr-filter-pills .pill-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -925,6 +929,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function askAssistant(question) {
     if (!selectedPR || !question.trim()) return;
+    const targetPrNumber = selectedPR.number;
 
     assistantCard.style.display = 'block';
     assistantShimmer.style.display = 'flex';
@@ -959,12 +964,16 @@ document.addEventListener('DOMContentLoaded', () => {
       assistantShimmer.style.display = 'none';
       if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
       if (!data.result?.answer) throw new Error('Provider returned no review answer');
-      assistantAnswerText.textContent = data.result.answer;
-      assistantAnswerText.style.color = '';
+      if (selectedPR?.number === targetPrNumber) {
+        assistantAnswerText.textContent = data.result.answer;
+        assistantAnswerText.style.color = '';
+      }
     } catch (err) {
       assistantShimmer.style.display = 'none';
-      assistantAnswerText.textContent = `Failed to query agent: ${err.message}`;
-      assistantAnswerText.style.color = 'var(--danger)';
+      if (selectedPR?.number === targetPrNumber) {
+        assistantAnswerText.textContent = `Failed to query agent: ${err.message}`;
+        assistantAnswerText.style.color = 'var(--danger)';
+      }
     }
   }
 
@@ -991,9 +1000,20 @@ document.addEventListener('DOMContentLoaded', () => {
     reposCardsGrid.innerHTML = '';
 
     const query = search.toLowerCase();
-    const repos = analyticsData.repositories.filter(r => {
-      return r.name.toLowerCase().includes(query) || r.description.toLowerCase().includes(query) || r.branch.toLowerCase().includes(query);
+    const repos = (analyticsData.repositories || []).filter(r => {
+      const name = (r.name || '').toLowerCase();
+      const desc = (r.description || '').toLowerCase();
+      const branch = (r.branch || 'main').toLowerCase();
+      return name.includes(query) || desc.includes(query) || branch.includes(query);
     });
+
+    if (!repos.length) {
+      const empty = document.createElement('p');
+      empty.className = 'repos-empty-state';
+      empty.textContent = 'No repositories found';
+      reposCardsGrid.appendChild(empty);
+      return;
+    }
 
     repos.forEach(repo => {
       const card = document.createElement('div');
@@ -1007,7 +1027,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <span class="badge badge-success">${escapeHtml(repo.status || '')}</span>
         </div>
         <div class="repo-card-footer">
-          <span class="branch-pill">🌿 ${escapeHtml(repo.branch || '')}</span>
+          <span class="branch-pill">🌿 ${escapeHtml(repo.branch || 'main')}</span>
           <span>${escapeHtml(String(repo.worktreesCount || 0))} active worktrees</span>
           <span style="color:var(--text-muted);">${escapeHtml(repo.lastSync || '')}</span>
         </div>
@@ -1176,20 +1196,50 @@ document.addEventListener('DOMContentLoaded', () => {
     const query = (agentSearchInput?.value || '').trim().toLowerCase();
     const filtered = liveAgents.filter(agent => {
       const status = getAgentStatus(agent);
-      const matchesFilter = activeAgentFilter === 'all' || status === activeAgentFilter;
+      const matchesFilter = activeAgentFilter === 'all' || activeAgentFilter === 'groups' || status === activeAgentFilter;
       const text = `${agent.name} ${agent.role} ${agent.provider} ${agent.model}`.toLowerCase();
       return matchesFilter && (!query || text.includes(query));
     });
-    const groups = [
-      ['needs-you', 'NEEDS YOU'],
-      ['review', 'TO REVIEW'],
-      ['working', 'WORKING'],
-      ['available', 'AVAILABLE']
-    ];
 
-    groups.forEach(([status, label]) => {
-      const agents = filtered.filter(agent => getAgentStatus(agent) === status);
-      if (!agents.length) return;
+    let renderedGroups = [];
+    if (activeAgentFilter === 'groups') {
+      const roleCategories = [
+        {
+          id: 'planning',
+          label: 'PLANNING & ARCHITECTURE',
+          filter: (a) => /architect|product|business|analyst/i.test(a.role || '')
+        },
+        {
+          id: 'engineering',
+          label: 'ENGINEERING',
+          filter: (a) => /developer|engineer|full-stack/i.test(a.role || '')
+        },
+        {
+          id: 'qa-delivery',
+          label: 'QA & DELIVERY',
+          filter: (a) => /tester|qa|integrator|devops/i.test(a.role || '') || !(/architect|product|business|analyst|developer|engineer|full-stack/i.test(a.role || ''))
+        }
+      ];
+      roleCategories.forEach(cat => {
+        const agents = filtered.filter(cat.filter);
+        if (!agents.length) return;
+        renderedGroups.push({ status: cat.id, label: cat.label, agents });
+      });
+    } else {
+      const statusGroups = [
+        ['needs-you', 'NEEDS YOU'],
+        ['review', 'TO REVIEW'],
+        ['working', 'WORKING'],
+        ['available', 'AVAILABLE']
+      ];
+      statusGroups.forEach(([status, label]) => {
+        const agents = filtered.filter(agent => getAgentStatus(agent) === status);
+        if (!agents.length) return;
+        renderedGroups.push({ status, label, agents });
+      });
+    }
+
+    renderedGroups.forEach(({ status, label, agents }) => {
       const group = document.createElement('section');
       group.className = `agent-status-group status-${status}`;
       const heading = document.createElement('h4');
@@ -1200,12 +1250,13 @@ document.addEventListener('DOMContentLoaded', () => {
       agents.forEach(agent => {
         const row = document.createElement('button');
         const humanOwned = isAgentHumanOwned(agent);
+        const cardStatus = getAgentStatus(agent);
         row.type = 'button';
         row.className = `agent-roster-row agentsroom-agent-card ${agent.name === selectedAgentName ? 'selected' : ''}`;
         row.dataset.agentName = agent.name;
-        row.dataset.status = status;
+        row.dataset.status = cardStatus;
         row.setAttribute('aria-pressed', String(agent.name === selectedAgentName));
-        row.setAttribute('aria-label', `${agent.name}, ${agent.role || 'Agent'}, ${humanOwned ? 'human owned' : agentStatusMeta[status].label}`);
+        row.setAttribute('aria-label', `${agent.name}, ${agent.role || 'Agent'}, ${humanOwned ? 'human owned' : (agentStatusMeta[cardStatus]?.label || cardStatus)}`);
 
         const avatar = document.createElement('span');
         avatar.className = 'agent-roster-avatar agent-card-avatar';
@@ -1214,7 +1265,7 @@ document.addEventListener('DOMContentLoaded', () => {
         avatar.style.setProperty('--agent-avatar-color', color);
         avatar.style.background = color;
         avatar.setAttribute('aria-hidden', 'true');
-        if (status === 'needs-you') {
+        if (cardStatus === 'needs-you') {
           const badge = document.createElement('span');
           badge.className = 'agent-card-badge';
           badge.textContent = '✦';
@@ -1269,17 +1320,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (elNeedsInputCount) elNeedsInputCount.textContent = String(needsYouCount);
     if (elTurnsCount) elTurnsCount.textContent = String(workingCount || (isPromptInFlight ? 1 : 0));
 
-    const counts = groups.map(([status, label]) => ({ status, label, count: liveAgents.filter(agent => getAgentStatus(agent) === status).length }));
-    if (agentStatusSummary) {
-      agentStatusSummary.replaceChildren();
-      counts.forEach(({ status, label, count }) => {
-        if (!count) return;
-        const item = document.createElement('div');
-        item.className = `agent-summary-item status-${status}`;
-        item.innerHTML = `<i aria-hidden="true"></i><strong>${count}</strong><span>${label}</span>`;
-        agentStatusSummary.appendChild(item);
-      });
-    }
+    // Preserve existing agent-status-summary DOM nodes and dispatch rendered event for cockpit
+    window.dispatchEvent(new CustomEvent('agentcrew:roster-rendered'));
   }
 
   function selectAgent(agentOrName) {
@@ -1314,14 +1356,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (agentSearchInput) agentSearchInput.addEventListener('input', renderAgentRoster);
   if (agentSelect) agentSelect.addEventListener('change', () => selectAgentByName(agentSelect.value));
-
-  document.addEventListener('keydown', event => {
-    if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey &&
-      !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
-      event.preventDefault();
-      agentSearchInput?.focus();
-    }
-  });
 
   // Load Agent Stations
   async function loadAgents() {
@@ -1363,19 +1397,34 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const res = await fetch('/api/v1/readiness');
       const data = await res.json();
-      if (!providerBadges) return;
-      providerBadges.innerHTML = '';
       const list = data.providers || [];
-      list.forEach(p => {
-        const badge = document.createElement('span');
-        const statusLabel = p.status === 'available' ? 'Available'
-          : p.status === 'quota_limited' ? 'Quota limited' : 'Unavailable';
-        badge.className = `badge ${p.status === 'available' ? 'badge-success' : 'badge-warning'}`;
-        const reset = p.reset_at ? ` · resets ${new Date(p.reset_at).toLocaleTimeString()}` : '';
-        badge.textContent = `Provider ${p.name}: ${statusLabel}${reset}`;
-        const affectedAgents = p.agents?.length ? ` Assigned agents: ${p.agents.join(', ')}.` : '';
-        badge.title = `${p.reason || `${p.name} runner detected`}${affectedAgents}`;
-        providerBadges.appendChild(badge);
+
+      if (providerBadges) {
+        providerBadges.innerHTML = '';
+        list.forEach(p => {
+          const badge = document.createElement('span');
+          const statusLabel = p.status === 'available' ? 'Available'
+            : p.status === 'quota_limited' ? 'Quota limited' : 'Unavailable';
+          badge.className = `badge ${p.status === 'available' ? 'badge-success' : 'badge-warning'}`;
+          const reset = p.reset_at ? ` · resets ${new Date(p.reset_at).toLocaleTimeString()}` : '';
+          badge.textContent = `Provider ${p.name}: ${statusLabel}${reset}`;
+          const affectedAgents = p.agents?.length ? ` Assigned agents: ${p.agents.join(', ')}.` : '';
+          badge.title = `${p.reason || `${p.name} runner detected`}${affectedAgents}`;
+          providerBadges.appendChild(badge);
+        });
+      }
+
+      // Update provider cards dynamically in #view-observability
+      document.querySelectorAll('#view-observability .provider-box').forEach(box => {
+        const strong = box.querySelector('strong')?.textContent.toLowerCase() || '';
+        const badge = box.querySelector('.provider-header .badge');
+        if (!badge) return;
+        const matched = list.find(p => strong.includes(p.name.toLowerCase()));
+        if (matched) {
+          const isAvail = matched.status === 'available';
+          badge.className = `badge ${isAvail ? 'badge-success' : (matched.status === 'quota_limited' ? 'badge-warning' : 'badge-danger')}`;
+          badge.textContent = isAvail ? 'Qualified' : (matched.status === 'quota_limited' ? 'Quota Limited' : 'Unavailable');
+        }
       });
     } catch (err) {
       log(`Readiness probe failed: ${err.message}`, 'action');
@@ -1386,6 +1435,40 @@ document.addEventListener('DOMContentLoaded', () => {
   function connectSSE() {
     const sse = new EventSource('/api/v1/events');
     const concDisplay = document.getElementById('concurrency-display');
+
+    sse.addEventListener('agent.updated', async () => {
+      await loadAgents();
+    });
+
+    sse.addEventListener('task.updated', async () => {
+      await loadTasks();
+    });
+
+    sse.addEventListener('popup_created', async () => {
+      await Promise.all([loadTasks(), loadPopups()]);
+    });
+
+    sse.addEventListener('agent.delta', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const deltaText = data.delta || data.text || '';
+        if (!deltaText) return;
+        const pendingMsg = document.getElementById('chat-pending-msg');
+        if (pendingMsg) {
+          let deltaContainer = pendingMsg.querySelector('#chat-streaming-delta');
+          if (!deltaContainer) {
+            deltaContainer = document.createElement('div');
+            deltaContainer.id = 'chat-streaming-delta';
+            deltaContainer.className = 'chat-streaming-delta';
+            const chatBody = pendingMsg.querySelector('.chat-body') || pendingMsg;
+            chatBody.appendChild(deltaContainer);
+          }
+          deltaContainer.hidden = false;
+          deltaContainer.textContent += deltaText;
+          if (teamRoomChatFeed) teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
+        }
+      } catch (_) {}
+    });
 
     sse.addEventListener('turn_concurrency', (e) => {
       const data = JSON.parse(e.data);
@@ -1435,6 +1518,21 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         const data = JSON.parse(e.data);
         if (!data || !data.text) return;
+
+        // Optimistic reconciliation: if this is a human message that matches client turn id,
+        // attach real server message id and prevent duplicate bubble
+        const turnId = data.metadata?.turn_id || data.metadata?.client_turn_id || data.turn_id;
+        if (data.sender_type === 'human' && turnId) {
+          const existingBubble = document.querySelector(`[data-client-turn-id="${turnId}"]`);
+          if (existingBubble) {
+            if (data.id) {
+              existingBubble.dataset.messageId = data.id;
+              renderedMessageIds.add(data.id);
+            }
+            return;
+          }
+        }
+
         if (data.id && renderedMessageIds.has(data.id)) return;
 
         const isAgent = data.sender_type === 'agent';
@@ -1947,21 +2045,21 @@ document.addEventListener('DOMContentLoaded', () => {
       // 1. Fetch Pull Requests from live repo
       const prRes = await fetch('/api/v1/pull-requests');
       const prData = await prRes.json();
-      if (Array.isArray(prData.pullRequests) && prData.pullRequests.length > 0) {
-        analyticsData.pullRequests = prData.pullRequests;
-        renderPRList('all');
+      analyticsData.pullRequests = Array.isArray(prData.pullRequests) ? prData.pullRequests : [];
+      renderPRList('all');
+      if (analyticsData.pullRequests.length > 0) {
         if (window.matchMedia('(min-width: 1181px)').matches) {
           selectPR(analyticsData.pullRequests[0]);
         }
+      } else {
+        closePRPanel();
       }
 
       // 2. Fetch Repositories & Worktrees from live repo
       const repoRes = await fetch('/api/v1/repositories');
       const repoData = await repoRes.json();
-      if (Array.isArray(repoData.repositories) && repoData.repositories.length > 0) {
-        analyticsData.repositories = repoData.repositories;
-        renderRepositories('');
-      }
+      analyticsData.repositories = Array.isArray(repoData.repositories) ? repoData.repositories : [];
+      renderRepositories('');
 
       // 3. Fetch Analytics & KPIs from live repo
       const analRes = await fetch('/api/v1/analytics');
@@ -2199,6 +2297,175 @@ document.addEventListener('DOMContentLoaded', () => {
     globalToastContainer.appendChild(toast);
   }
 
+  // --- Cross-Module Synchronization Hooks & Public API ---
+  window.agentCrewRefreshTasks = loadTasks;
+  window.agentCrewRefreshAgents = loadAgents;
+  window.agentCrewReloadFeed = () => {
+    const ag = liveAgents.find(a => a.name === selectedAgentName);
+    if (ag) loadAgentRoomFeed(ag);
+  };
+  window.openModalDialog = openModalDialog;
+  window.closeModalDialog = closeModalDialog;
+  window.showToast = showToast;
+
+  // --- Scope Modifications & Popups (P-xxx Tickets) ---
+  async function loadPopups() {
+    const popupList = document.getElementById('popup-list');
+    if (!popupList) return;
+    try {
+      const res = await fetch('/api/v1/popups');
+      if (!res.ok) throw new Error('Failed to fetch popups');
+      const data = await res.json();
+      const popups = Array.isArray(data.popups) ? data.popups : [];
+      popupList.replaceChildren();
+
+      if (!popups.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = 'No active scope modification tickets. Click "Propose Scope Change" to record mid-flight requirement adjustments.';
+        popupList.appendChild(empty);
+        return;
+      }
+
+      popups.forEach(ticket => {
+        const item = document.createElement('div');
+        item.className = 'popup-item';
+        item.dataset.ticketId = ticket.id;
+
+        const isAwaiting = ticket.status === 'awaiting_approval';
+        const delay = ticket.impact?.estimatedDelayHours || 0;
+        const tasks = (ticket.affectedTasks || []).join(', ') || 'None';
+
+        item.innerHTML = `
+          <div class="popup-item-header">
+            <div>
+              <span class="popup-ticket-id">${escapeHtml(ticket.id)}</span>
+              <strong style="margin-left: 8px;">${escapeHtml(ticket.title || 'Scope Change')}</strong>
+            </div>
+            <span class="badge ${ticket.status === 'approved' ? 'badge-success' : (ticket.status === 'rejected' ? 'badge-danger' : 'badge-warning')}">${escapeHtml(ticket.status || 'unknown')}</span>
+          </div>
+          <p style="margin: 4px 0; font-size: 13px; color: var(--text-muted);">${escapeHtml(ticket.description || ticket.impact?.discardedWorkSummary || 'No details provided.')}</p>
+          <div style="font-size: 12px; color: #94a3b8;">
+            <span>Affected: <strong>${escapeHtml(tasks)}</strong></span> ·
+            <span>Est. Delay: <strong>${delay}h</strong></span> ·
+            <span>Req by: <strong>${escapeHtml(ticket.requestedBy || 'operator')}</strong></span>
+          </div>
+          ${isAwaiting ? `
+            <div class="popup-item-actions">
+              <button type="button" class="btn btn-sm btn-success btn-approve-popup" data-ticket-id="${escapeHtml(ticket.id)}">Approve Scope</button>
+              <button type="button" class="btn btn-sm btn-danger btn-reject-popup" data-ticket-id="${escapeHtml(ticket.id)}">Reject</button>
+            </div>
+          ` : ''}
+        `;
+
+        item.querySelector('.btn-approve-popup')?.addEventListener('click', async () => {
+          await decidePopup(ticket.id, 'approve');
+        });
+        item.querySelector('.btn-reject-popup')?.addEventListener('click', async () => {
+          await decidePopup(ticket.id, 'reject');
+        });
+
+        popupList.appendChild(item);
+      });
+    } catch (err) {
+      console.warn('Could not load popups:', err);
+    }
+  }
+
+  async function decidePopup(ticketId, decision) {
+    try {
+      const res = await fetch('/api/v1/commands', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command_type: 'popup.decide',
+          payload: { ticket_id: ticketId, decision }
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Failed to ${decision} popup`);
+      showToast(`Scope ticket ${ticketId} ${decision}d.`, 'success');
+      await Promise.all([loadTasks(), loadPopups()]);
+    } catch (err) {
+      showToast(err.message, 'warning');
+      await Promise.all([loadTasks(), loadPopups()]);
+    }
+  }
+
+  const btnNewPopup = document.getElementById('btn-new-popup');
+  if (btnNewPopup) {
+    btnNewPopup.addEventListener('click', () => {
+      openModalDialog({
+        title: 'Propose Scope Change (P-xxx)',
+        subtitle: 'Record mid-flight requirement adjustments and pause affected tasks for operator sign-off',
+        contentHtml: `
+          <form id="form-new-popup" style="display:flex;flex-direction:column;gap:12px;">
+            <div>
+              <label style="display:block;margin-bottom:4px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Change Title</label>
+              <input type="text" id="popup-input-title" required placeholder="e.g. Add JWT token expiry" style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;box-sizing:border-box;">
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:4px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Description & Rationale</label>
+              <textarea id="popup-input-description" rows="3" required placeholder="Describe why this scope adjustment is necessary..." style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;box-sizing:border-box;resize:vertical;"></textarea>
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:4px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Affected Tasks (comma-separated IDs)</label>
+              <input type="text" id="popup-input-tasks" placeholder="e.g. TASK-14, TASK-18" style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;box-sizing:border-box;">
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:4px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Estimated Delay (hours)</label>
+              <input type="number" id="popup-input-delay" min="0" value="2" style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;box-sizing:border-box;">
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+              <button type="button" class="btn btn-secondary" id="btn-cancel-popup">Cancel</button>
+              <button type="submit" class="btn btn-warning" id="btn-submit-popup">Propose Ticket</button>
+            </div>
+          </form>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-cancel-popup')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#form-new-popup')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const title = body.querySelector('#popup-input-title')?.value.trim();
+            const description = body.querySelector('#popup-input-description')?.value.trim();
+            const affectedStr = body.querySelector('#popup-input-tasks')?.value.trim() || '';
+            const delayHours = Number(body.querySelector('#popup-input-delay')?.value) || 0;
+            const affectedTasks = affectedStr.split(',').map(s => s.trim()).filter(Boolean);
+
+            const submitBtn = body.querySelector('#btn-submit-popup');
+            if (submitBtn) submitBtn.disabled = true;
+
+            try {
+              const res = await fetch('/api/v1/commands', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  command_type: 'popup.propose',
+                  payload: {
+                    title,
+                    description,
+                    estimated_impact: {
+                      affected_tasks: affectedTasks,
+                      delay_hours: delayHours
+                    }
+                  }
+                })
+              });
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || 'Failed to propose scope change');
+              closeModalDialog();
+              showToast(`Scope change ticket ${data.result?.ticket?.id || 'P-xxx'} proposed!`, 'success');
+              await Promise.all([loadTasks(), loadPopups()]);
+            } catch (err) {
+              showToast(err.message, 'warning');
+              if (submitBtn) submitBtn.disabled = false;
+            }
+          });
+        }
+      });
+    });
+  }
+
   // --- Composer Attachments State & Renderer (Phase 2) ---
   const activeComposerAttachments = {
     tools: new Set(),
@@ -2285,13 +2552,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Append human message to feed (appendRoomMessage records renderedMessageIds)
     const tempMsgId = 'human-' + Date.now();
-    appendRoomMessage({
+    const optimisticBubble = appendRoomMessage({
       id: tempMsgId,
+      client_turn_id: tempMsgId,
       sender_name: 'You',
       sender_type: 'human',
       text: trimmed,
       created_at: new Date().toISOString()
     });
+    if (optimisticBubble) {
+      optimisticBubble.dataset.clientTurnId = tempMsgId;
+    }
 
     // Show pending indicator in feed
     appendPendingIndicator(agentName);
@@ -2325,6 +2596,7 @@ document.addEventListener('DOMContentLoaded', () => {
             metadata: {
               target_agent: agentName,
               turn_id: tempMsgId,
+              client_turn_id: tempMsgId,
               attached_tools: sentTools,
               attached_context: sentContext,
               attached_docs: sentDocs
@@ -2337,6 +2609,14 @@ document.addEventListener('DOMContentLoaded', () => {
           const data = await res.json();
           if (data.message?.id) {
             renderedMessageIds.add(data.message.id);
+          }
+          if (data.dispatched === false) {
+            if (promptAbortController === myController) {
+              removePendingIndicator();
+              setPromptInFlight(false);
+            }
+            showToast(data.reason || 'Message saved (scheduler paused)', 'warning');
+            return;
           }
           dispatched = true;
         }
@@ -2461,22 +2741,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // AgentsRoom Cockpit Utility Controls (delegated to cockpit-actions.js)
   const btnToggleFilesChanges = document.getElementById('btn-toggle-files-changes');
-  if (btnToggleFilesChanges) {
-    btnToggleFilesChanges.addEventListener('click', () => {
-      switchView('view-reviews');
-    });
-  }
-
   const btnRailChat = document.getElementById('btn-rail-chat');
-  if (btnRailChat) {
-    btnRailChat.addEventListener('click', () => {
-      switchView('view-team-room');
-      if (panelChatView) panelChatView.hidden = false;
-      if (panelTerminalView) panelTerminalView.hidden = true;
-      teamChatInput?.focus();
-    });
-  }
 
   // --- Topbar Controls & Quick Switchers ---
   document.getElementById('topbar-home-btn')?.addEventListener('click', () => switchView('view-overview'));
@@ -2660,15 +2927,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const topbarUserName = document.getElementById('topbar-user-name');
 
   const savedOperatorName = localStorage.getItem('agentcrew_operator_name');
-  if (savedOperatorName && topbarUserName) {
-    topbarUserName.textContent = savedOperatorName;
+  if (savedOperatorName) {
+    if (topbarUserName) topbarUserName.textContent = savedOperatorName;
+    const settingsOp = document.getElementById('settings-operator-name') || document.querySelector('#view-settings .profile-preview-row h4');
+    if (settingsOp) settingsOp.textContent = savedOperatorName;
   }
 
   if (topbarUserProfile) {
     topbarUserProfile.addEventListener('click', () => {
       const currentName = topbarUserName?.textContent || 'Human Operator';
       const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
-      const currentAutoscroll = localStorage.getItem('agentcrew_autoscroll') !== 'false';
+      const currentAutoscroll = (localStorage.getItem('agentcrew-pref-autoscroll') ?? localStorage.getItem('agentcrew_autoscroll')) !== 'false';
 
       openModalDialog({
         title: 'Operator Profile & Preferences',
@@ -2711,8 +2980,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const newAutoscroll = !!body.querySelector('#pref-autoscroll')?.checked;
 
             localStorage.setItem('agentcrew_operator_name', newName);
+            localStorage.setItem('agentcrew-pref-autoscroll', String(newAutoscroll));
             localStorage.setItem('agentcrew_autoscroll', String(newAutoscroll));
             if (topbarUserName) topbarUserName.textContent = newName;
+            const settingsOp = document.getElementById('settings-operator-name') || document.querySelector('#view-settings .profile-preview-row h4');
+            if (settingsOp) settingsOp.textContent = newName;
 
             if (newTheme !== currentTheme) {
               applyTheme(newTheme, true);
@@ -2934,7 +3206,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('keydown', (e) => {
     if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const active = document.activeElement;
-      const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+      const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable);
       if (!isInput) {
         e.preventDefault();
         if (topbarSearchInput) {
@@ -2943,16 +3215,24 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
     } else if (e.key === 'Escape') {
-      if (topbarSearchResults && !topbarSearchResults.hidden) {
-        closeSearchPalette();
-        return;
-      }
       if (sharedDialogModal && !sharedDialogModal.hidden) {
         closeModalDialog();
         return;
       }
       if (projectWizardModal && !projectWizardModal.hidden) {
         closeProjectWizard();
+        return;
+      }
+      if (topbarSearchResults && !topbarSearchResults.hidden) {
+        closeSearchPalette();
+        return;
+      }
+      if (appSidebar && appSidebar.classList.contains('open')) {
+        setMobileDrawer(false);
+        return;
+      }
+      if (selectedPR) {
+        closePRPanel();
         return;
       }
     }
@@ -3101,15 +3381,17 @@ document.addEventListener('DOMContentLoaded', () => {
       }).join('');
 
       const branchesHtml = suggestedBranches.map(b => {
-        const val = `branch:${b}`;
+        const branchName = typeof b === 'string' ? b : (b?.name || '');
+        if (!branchName) return '';
+        const val = `branch:${branchName}`;
         const checked = activeComposerAttachments.context.has(val) ? 'checked' : '';
         return `
           <label style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:6px;font-size:12px;margin:3px;cursor:pointer;">
             <input type="checkbox" name="context-item" value="${escapeHtml(val)}" ${checked}>
-            <span>🌿 ${escapeHtml(b)}</span>
+            <span>🌿 ${escapeHtml(branchName)}</span>
           </label>
         `;
-      }).join('');
+      }).filter(Boolean).join('');
 
       openModalDialog({
         title: 'Attach Context to Prompt',
@@ -3311,9 +3593,12 @@ document.addEventListener('DOMContentLoaded', () => {
   if (btnCloseProjectWizard) btnCloseProjectWizard.addEventListener('click', closeProjectWizard);
   if (btnCancelProjectWizard) btnCancelProjectWizard.addEventListener('click', closeProjectWizard);
 
+  let isSubmittingWizard = false;
   if (projectWizardForm) {
     projectWizardForm.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (isSubmittingWizard) return;
+
       const name = document.getElementById('wizard-project-name')?.value?.trim();
       const path = document.getElementById('wizard-project-path')?.value?.trim();
       const zone = document.getElementById('wizard-project-zone')?.value || 'work';
@@ -3321,6 +3606,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (!name || !path) return;
       if (wizardErrorMsg) wizardErrorMsg.hidden = true;
+
+      const submitBtn = projectWizardForm.querySelector('button[type="submit"]');
+      isSubmittingWizard = true;
+      if (submitBtn) submitBtn.disabled = true;
 
       try {
         const res = await fetch('/api/v1/projects', {
@@ -3339,44 +3628,81 @@ document.addEventListener('DOMContentLoaded', () => {
           wizardErrorMsg.textContent = err.message;
           wizardErrorMsg.hidden = false;
         }
+      } finally {
+        isSubmittingWizard = false;
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    });
+  }
+
+  if (projectWizardModal) {
+    projectWizardModal.addEventListener('click', (e) => {
+      if (e.target === projectWizardModal) {
+        closeProjectWizard();
       }
     });
   }
 
   // Pop-Out Detachable Terminal (TASK-46)
-  if (btnPopoutTerminal) {
-    btnPopoutTerminal.addEventListener('click', async () => {
-      const agentId = selectedAgentName || agentSelect?.value || 'Dev-1';
-      let token = takeoverTokens.get(agentId) || '';
+  const btnPopoutTerminalTop = document.getElementById('btn-popout-terminal-top');
+  let popoutTerminalPollInterval = null;
 
-      if (!token) {
-        try {
-          const res = await fetch('/api/v1/commands', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'takeover', agent_id: agentId })
-          });
-          const result = await res.json();
-          if (res.ok && result.result?.takeover_token) {
-            token = result.result.takeover_token;
-            takeoverTokens.set(agentId, token);
-            persistTakeoverTokens();
-            if (stateBadge) stateBadge.textContent = 'Human Owned';
-            if (btnTakeover) btnTakeover.disabled = true;
-            if (btnRelease) btnRelease.disabled = false;
-            loadAgents();
-          }
-        } catch (_) {}
+  async function openPopoutTerminal() {
+    const agentId = selectedAgentName || agentSelect?.value || 'Dev-1';
+    let token = takeoverTokens.get(agentId) || '';
+
+    if (!token) {
+      try {
+        const res = await fetch('/api/v1/commands', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'takeover', agent_id: agentId })
+        });
+        const result = await res.json();
+        if (res.ok && result.result?.takeover_token) {
+          token = result.result.takeover_token;
+          takeoverTokens.set(agentId, token);
+          persistTakeoverTokens();
+          if (stateBadge) stateBadge.textContent = 'Human Owned';
+          if (btnTakeover) btnTakeover.disabled = true;
+          if (btnRelease) btnRelease.disabled = false;
+          loadAgents();
+        }
+      } catch (_) {}
+    }
+
+    const url = `/terminal?agent=${encodeURIComponent(agentId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+    const popoutWin = window.open(url, `agentcrew_term_${agentId}`, 'width=960,height=600,menubar=no,toolbar=no,location=no,status=no');
+
+    if (!popoutWin) {
+      showToast('Pop-out window was blocked by the browser. Please allow popups.', 'warning');
+      return;
+    }
+
+    // Detach embedded PTY so the popout window does not get a 409 Conflict
+    disconnectPty();
+    if (btnPopoutTerminal) btnPopoutTerminal.disabled = true;
+    if (btnPopoutTerminalTop) btnPopoutTerminalTop.disabled = true;
+    log(`Detached xterm terminal opened for ${agentId}`, 'system');
+
+    if (popoutTerminalPollInterval) clearInterval(popoutTerminalPollInterval);
+    popoutTerminalPollInterval = setInterval(() => {
+      if (popoutWin.closed) {
+        clearInterval(popoutTerminalPollInterval);
+        popoutTerminalPollInterval = null;
+        if (btnPopoutTerminal) btnPopoutTerminal.disabled = false;
+        if (btnPopoutTerminalTop) btnPopoutTerminalTop.disabled = false;
+        log(`Detached terminal for ${agentId} closed. Reconnecting local PTY...`, 'system');
+        const ag = liveAgents.find(a => a.name === selectedAgentName);
+        if (ag && isTakenOver(ag)) {
+          connectPty(ag.name);
+        }
       }
-
-      // Detach embedded PTY so the popout window does not get a 409 Conflict
-      disconnectPty();
-
-      const url = `/terminal?agent=${encodeURIComponent(agentId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
-      window.open(url, `agentcrew_term_${agentId}`, 'width=960,height=600,menubar=no,toolbar=no,location=no,status=no');
-      log(`Detached xterm terminal opened for ${agentId}`, 'system');
-    });
+    }, 1000);
   }
+
+  if (btnPopoutTerminal) btnPopoutTerminal.addEventListener('click', openPopoutTerminal);
+  if (btnPopoutTerminalTop) btnPopoutTerminalTop.addEventListener('click', openPopoutTerminal);
 
   // --- Initial Boot ---
   updateOverview('week');
@@ -3399,6 +3725,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadAgents();
   loadReadiness();
   loadTasks();
+  loadPopups();
   loadRealRepositoryData();
   connectSSE();
 });

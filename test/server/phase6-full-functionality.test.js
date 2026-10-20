@@ -74,6 +74,17 @@ test('Phase 6 full functionality acceptance gates', async (t) => {
     const staged = await json(await fetch(`${baseUrl}/api/v1/git/diff?path=staged.txt&view=staged`));
     assert.match(staged.diff, /staged change/);
     assert.equal((await fetch(`${baseUrl}/api/v1/git/diff?path=../outside`)).status, 400);
+    fs.writeFileSync(path.join(repoA, 'large-untracked.txt'), 'x'.repeat(65537));
+    const largeDiff = await json(await fetch(`${baseUrl}/api/v1/git/diff?path=large-untracked.txt`));
+    assert.match(largeDiff.diff, /larger than 64 KB/);
+    fs.writeFileSync(path.join(root, 'outside-target.txt'), 'outside secret');
+    let symlinkCreated = false;
+    try { fs.symlinkSync(path.join(root, 'outside-target.txt'), path.join(repoA, 'outside-target-link')); symlinkCreated = true; } catch (_) {}
+    if (symlinkCreated) {
+      const symlinkDiff = await json(await fetch(`${baseUrl}/api/v1/git/diff?path=outside-target-link`));
+      assert.match(symlinkDiff.diff, /Skipped untracked symlink/);
+      assert.doesNotMatch(symlinkDiff.diff, /outside secret/);
+    }
 
     const files = await json(await fetch(`${baseUrl}/api/v1/context?kind=files`));
     assert.ok(files.files.includes('AGENTS.md'));
@@ -141,12 +152,18 @@ test('Phase 6 full functionality acceptance gates', async (t) => {
     assert.ok(idea.result.id);
     const promote = await post(baseUrl, 'idea.promote', { id: idea.result.id });
     assert.equal(promote.status, 200);
+    assert.equal((await json(promote)).result.stage, 'planning');
     assert.ok((await json(await fetch(`${baseUrl}/api/v1/tasks`))).tasks.length);
 
+    fs.mkdirSync(path.join(repoA, 'backlog', 'tasks'), { recursive: true });
     const createTask = await json(await post(baseUrl, 'task.create', { title: 'Phase 6 transition task', stage: 'todo' }));
     const transition = await post(baseUrl, 'task.transition', { id: createTask.result.id, stage: 'review' });
+    assert.equal(createTask.result.stage, 'planning');
     assert.equal(transition.status, 200);
     assert.equal((await json(transition)).result.stage, 'review');
+    const taskMarkdown = fs.readFileSync(path.join(repoA, 'backlog', 'tasks', `${createTask.result.id}.md`), 'utf8');
+    assert.match(taskMarkdown, /updated_at:/);
+    assert.match(taskMarkdown, /status: "Review"/);
 
     const snippet = await json(await post(baseUrl, 'snippet.save', { title: 'Release prompt', content: 'Check release notes' }));
     assert.ok(snippet.result.id);
@@ -182,6 +199,35 @@ test('Phase 6 full functionality acceptance gates', async (t) => {
     assert.ok(state.items.every((job) => job.project_id === projectB.id));
     const prefs = await json(await fetch(`${baseUrl}/api/v1/preferences`));
     assert.notEqual(prefs.preferences.theme, 'dark');
+  });
+
+  await t.test('idempotent commands, task deduplication, idea single-promotion, and untracked diffs', async () => {
+    fs.mkdirSync(path.join(repoA, 'backlog', 'tasks'), { recursive: true });
+    const request = (body) => fetch(`${baseUrl}/api/v1/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const first = await request({ command_type: 'task.create', payload: { title: 'Deduplicated task', stage: 'planning' }, idempotency_key: 'task-create-1' });
+    const firstReceipt = await json(first);
+    const sameRetryResponse = await request({ command_type: 'task.create', payload: { title: 'Deduplicated task', stage: 'planning' }, idempotency_key: 'task-create-1' });
+    const retryReceipt = await json(sameRetryResponse);
+    assert.equal(retryReceipt.command_id, firstReceipt.command_id);
+    const conflictingRetry = await request({ command_type: 'task.create', payload: { title: 'Different retry body' }, idempotency_key: 'task-create-1' });
+    assert.equal(conflictingRetry.status, 409);
+    assert.equal((await json(conflictingRetry)).code, 'IDEMPOTENCY_CONFLICT');
+    const mismatch = await request({ project_id: projectA.id, command_type: 'task.create', payload: { title: 'wrong project' } });
+    assert.equal(mismatch.status, 409);
+    assert.equal((await json(mismatch)).code, 'PROJECT_MISMATCH');
+    const listed = await json(await fetch(`${baseUrl}/api/v1/tasks`));
+    assert.equal(listed.tasks.filter((task) => task.id === firstReceipt.result.id).length, 1);
+
+    const idea = await json(await post(baseUrl, 'idea.save', { title: 'Promote once' }));
+    const promoted = await post(baseUrl, 'idea.promote', { id: idea.result.id });
+    assert.equal(promoted.status, 200);
+    const duplicatePromotion = await post(baseUrl, 'idea.promote', { id: idea.result.id });
+    assert.equal(duplicatePromotion.status, 409);
+    assert.match((await json(duplicatePromotion)).error, /already been promoted/);
+
+    fs.writeFileSync(path.join(repoB, 'untracked.txt'), 'untracked content\n');
+    const diff = await json(await fetch(`${baseUrl}/api/v1/git/diff?path=untracked.txt`));
+    assert.match(diff.diff, /untracked content/);
   });
 
   await t.test('static application and terminal assets are served', async () => {

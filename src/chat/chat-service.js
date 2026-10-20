@@ -402,6 +402,7 @@ class ChatService {
 
             // Parse response events and capture thread_id for session tracking
             let answerText = '';
+            const assistantMessages = [];
             let threadId = null;
             const lines = (result.stdout || '').split('\n');
             for (const line of lines) {
@@ -414,10 +415,10 @@ class ChatService {
 
               const event = adapter.parseStreamEvent(line);
               if (event && event.type === 'message.assistant' && event.text) {
-                answerText = event.text;
-                break;
+                assistantMessages.push(event.text);
               }
             }
+            answerText = assistantMessages.at(-1) || '';
 
             if (threadId) {
               await this.saveAgentSession(agent.name, {

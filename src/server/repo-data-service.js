@@ -54,6 +54,7 @@ class RepoDataService {
       for (const filename of files) {
         try {
           const filePath = path.join(tasksDir, filename);
+          const fileMtime = fs.statSync(filePath).mtime.toISOString();
           const content = fs.readFileSync(filePath, 'utf8');
           const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
 
@@ -88,7 +89,13 @@ class RepoDataService {
             stage = 'in_progress';
           } else if (sLower.includes('review')) {
             stage = 'review';
-          } else if (sLower.includes('qa') || sLower.includes('test')) {
+          } else if (sLower === 'planning') {
+            stage = 'planning';
+          } else if (sLower === 'backlog') {
+            stage = 'planning';
+          } else if (sLower === 'to do' || sLower === 'todo') {
+            stage = 'planning';
+          } else if (sLower === 'qa' || sLower.includes('test')) {
             stage = 'qa';
           } else {
             stage = 'planning';
@@ -120,7 +127,8 @@ class RepoDataService {
             priority,
             owner,
             ordinal,
-            created_date: fields.created_date || null
+            created_date: fields.created_date || null,
+            updated_at: fields.updated_at || fields.updated_date || fileMtime
           });
         } catch (_) {
           // ignore corrupted task file
@@ -133,8 +141,11 @@ class RepoDataService {
       const stored = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
       if (Array.isArray(stored)) for (const task of stored) {
         if (!task || !task.id || tasks.some((item) => item.id === task.id)) continue;
-        const status = ({ backlog: 'Backlog', todo: 'To Do', in_progress: 'In Progress', review: 'Review', done: 'Done' })[task.stage] || task.status || 'To Do';
-        tasks.push({ id: task.id, numId: 999, title: task.title || task.id, status, stage: task.stage || 'planning', priority: task.priority || 'medium', owner: task.owner || 'Dev-1', ordinal: 999000 + tasks.length, created_date: task.created_at || null });
+        const stage = task.stage === 'backlog' || task.stage === 'todo'
+          ? 'planning'
+          : ['planning', 'in_progress', 'review', 'qa', 'done'].includes(task.stage) ? task.stage : 'planning';
+        const status = ({ planning: 'Planning', in_progress: 'In Progress', review: 'Review', qa: 'QA', done: 'Done' })[stage] || task.status || 'Planning';
+        tasks.push({ id: task.id, numId: 999, title: task.title || task.id, status, stage, priority: task.priority || 'medium', owner: task.owner || 'Dev-1', ordinal: 999000 + tasks.length, created_date: task.created_at || null });
       }
     } catch (_) {}
 
@@ -508,7 +519,7 @@ class RepoDataService {
     const completedCount = String(deliveredCount);
     const cycleTime = this.observedCycleTimeMs;
     const qaPassRate = this.observedQaPassRate;
-    const concurrency = `${runningConc} / ${maxConc}`;
+    const concurrency = `${scheduler?.activeCount ?? scheduler?.runningCount ?? 0} / ${maxConc}`;
 
     const kpis = {
       week: [

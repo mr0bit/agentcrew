@@ -339,7 +339,7 @@ test('SupervisorServer serves TRD §12 API routes and SSE stream', async (t) => 
     assert.equal(paused.status, 409);
     assert.equal((await paused.json()).status, 'error');
     const mention = await fetch(`${baseUrl}/api/v1/room/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: '@Dev-1 held' }) });
-    assert.equal((await mention.json()).scheduler, 'paused');
+    const mentionData = await mention.json(); assert.equal(mentionData.dispatched, false); assert.equal(mentionData.reason, 'Scheduler is paused');
     await post('scheduler.resume');
 
     const invalidRecipients = await post('message.broadcast', { agent_ids: ['not-on-roster'], text: 'hello' });
@@ -357,8 +357,10 @@ test('SupervisorServer serves TRD §12 API routes and SSE stream', async (t) => 
     const promoted = await post('idea.promote', { id: idea.result.id });
     assert.equal(promoted.status, 200);
     const promotedTask = (await promoted.json()).result;
+    assert.equal(promotedTask.stage, 'planning');
     const promotedFile = path.join(server.repoPath, 'backlog', 'tasks', `${promotedTask.id}.md`);
     assert.ok(fs.existsSync(promotedFile));
+    assert.match(fs.readFileSync(promotedFile, 'utf8'), /status: \"Planning\"/);
     fs.rmSync(promotedFile, { force: true });
     const snippet = await post('snippet.save', { title: 'Review prompt', content: 'Check edge cases' });
     assert.equal(snippet.status, 200);
@@ -366,12 +368,18 @@ test('SupervisorServer serves TRD §12 API routes and SSE stream', async (t) => 
     assert.equal((await (await fetch(`${baseUrl}/api/v1/snippets`)).json()).snippets.length, 1);
     assert.equal((await post('snippet.delete', { id: snippetId })).status, 200);
 
+    const defaultCreated = await (await post('task.create', { title: 'Default API task stage' })).json();
+    assert.equal(defaultCreated.result.stage, 'planning');
+    const defaultTaskFile = path.join(server.repoPath, 'backlog', 'tasks', `${defaultCreated.result.id}.md`);
+    assert.match(fs.readFileSync(defaultTaskFile, 'utf8'), /status: \"Planning\"/);
+    fs.rmSync(defaultTaskFile, { force: true });
+
     const created = await (await post('task.create', { title: 'New API task', stage: 'todo' })).json();
-    assert.equal(created.result.stage, 'todo');
+    assert.equal(created.result.stage, 'planning');
     assert.ok((await (await fetch(`${baseUrl}/api/v1/tasks`)).json()).tasks.some((task) => task.id === created.result.id));
     const taskFile = path.join(server.repoPath, 'backlog', 'tasks', `${created.result.id}.md`);
     assert.ok(fs.existsSync(taskFile));
-    assert.match(fs.readFileSync(taskFile, 'utf8'), /status: "To Do"/);
+    assert.match(fs.readFileSync(taskFile, 'utf8'), /status: "Planning"/);
     assert.equal((await post('task.transition', { id: created.result.id, stage: 'review' })).status, 200);
     assert.match(fs.readFileSync(taskFile, 'utf8'), /status: "Review"/);
     assert.match(fs.readFileSync(taskFile, 'utf8'), /New API task/);
@@ -488,6 +496,12 @@ test('SupervisorServer serves TRD §12 API routes and SSE stream', async (t) => 
     assert.equal(takeoverData.result.agent_id, 'Dev-1');
     assert.equal(takeoverData.result.state, 'human_owned');
     const token = takeoverData.result.takeover_token;
+    const configureOwned = await fetch(`${baseUrl}/api/v1/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command_type: 'agent.configure', payload: { agent_id: 'Dev-1', role: 'Blocked update' } }) });
+    assert.equal(configureOwned.status, 409);
+    assert.equal((await configureOwned.json()).code, 'AGENT_ACTIVE');
+    const resetOwned = await fetch(`${baseUrl}/api/v1/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command_type: 'session.reset', payload: { agent_id: 'Dev-1' } }) });
+    assert.equal(resetOwned.status, 409);
+    assert.equal((await resetOwned.json()).code, 'SESSION_ACTIVE');
 
     const conflictRes = await fetch(`${baseUrl}/api/v1/commands`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -676,10 +690,94 @@ test('SupervisorServer serves TRD §12 API routes and SSE stream', async (t) => 
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'agentcrew-task-state-'));
     try {
       fs.mkdirSync(path.join(repo, '.agentcrew'), { recursive: true });
-      fs.writeFileSync(path.join(repo, '.agentcrew', 'tasks.json'), JSON.stringify([{ id: 'task-state-1', title: 'Stored task', stage: 'in_progress', created_at: '2026-10-20T00:00:00.000Z' }]));
+      fs.writeFileSync(path.join(repo, '.agentcrew', 'tasks.json'), JSON.stringify([
+        { id: 'task-state-1', title: 'Stored task', stage: 'in_progress', created_at: '2026-10-20T00:00:00.000Z' },
+        { id: 'task-state-backlog', title: 'Legacy backlog', stage: 'backlog' },
+        { id: 'task-state-todo', title: 'Legacy todo', stage: 'todo' }
+      ]));
       const tasks = await new RepoDataService({ repoPath: repo }).getBacklogTasks();
       assert.ok(tasks.some((task) => task.id === 'task-state-1' && task.stage === 'in_progress'));
+      assert.ok(tasks.some((task) => task.id === 'task-state-backlog' && task.stage === 'planning'));
+      assert.ok(tasks.some((task) => task.id === 'task-state-todo' && task.stage === 'planning'));
     } finally { fs.rmSync(repo, { recursive: true, force: true }); }
+  });
+
+  await t.test('GET /api/v1/tasks normalizes legacy merged task stages', async () => {
+    const original = server.readProjectCollection(project.id, 'tasks');
+    try {
+      server.writeProjectCollection(project.id, 'tasks', [
+        { id: 'legacy-backlog-task', title: 'Legacy backlog', stage: 'backlog' },
+        { id: 'legacy-todo-task', title: 'Legacy todo', stage: 'todo' }
+      ]);
+      const tasks = (await (await fetch(`${baseUrl}/api/v1/tasks`)).json()).tasks;
+      assert.equal(tasks.find((task) => task.id === 'legacy-backlog-task').stage, 'planning');
+      assert.equal(tasks.find((task) => task.id === 'legacy-todo-task').stage, 'planning');
+    } finally { server.writeProjectCollection(project.id, 'tasks', original); }
+  });
+
+  await t.test('project switch rejects new commands, room messages, and terminal upgrades', async () => {
+    server.projectSwitching = true;
+    try {
+      const command = await fetch(`${baseUrl}/api/v1/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command_type: 'task.create', payload: { title: 'blocked' } }) });
+      assert.equal(command.status, 409);
+      assert.deepEqual(await command.json(), { status: 'error', code: 'PROJECT_SWITCH_IN_PROGRESS', error: 'Project switch in progress or active project changed' });
+      const message = await fetch(`${baseUrl}/api/v1/room/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'blocked' }) });
+      assert.equal(message.status, 409);
+      assert.deepEqual(await message.json(), { status: 'error', code: 'PROJECT_SWITCH_IN_PROGRESS', error: 'Project switch in progress or active project changed' });
+      let wire = '';
+      const socket = { write(value) { wire += value; }, destroy() {} };
+      await server.handleUpgrade({ url: '/api/v1/pty', headers: { host: 'localhost' } }, socket, Buffer.alloc(0));
+      assert.match(wire, /^HTTP\/1\.1 409 Conflict/);
+      assert.match(wire, /Project switch in progress/);
+    } finally { server.projectSwitching = false; }
+  });
+
+  await t.test('POST mutation rejects if project changes while its body is being read', async () => {
+    const originalProjectId = server.activeProjectId;
+    const originalReadJsonBody = server.readJsonBody;
+    let bodyReadStarted;
+    let releaseBody;
+    const started = new Promise((resolve) => { bodyReadStarted = resolve; });
+    const bodyGate = new Promise((resolve) => { releaseBody = resolve; });
+    server.readJsonBody = async () => { bodyReadStarted(); await bodyGate; return { command_type: 'task.create', payload: { title: 'stale project write' } }; };
+    try {
+      const pending = fetch(`${baseUrl}/api/v1/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      await started;
+      server.activeProjectId = 'switched-project';
+      releaseBody();
+      const response = await pending;
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { status: 'error', code: 'PROJECT_SWITCH_IN_PROGRESS', error: 'Project switch in progress or active project changed' });
+    } finally {
+      releaseBody();
+      server.activeProjectId = originalProjectId;
+      server.readJsonBody = originalReadJsonBody;
+    }
+  });
+
+  await t.test('forced project switch releases quiesced agent scheduler holds', async () => {
+    const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentcrew-force-switch-'));
+    try {
+      const target = await workspace.registerProject({ path: targetDir, name: 'Forced Switch Target', mode: 'independent', zone: 'work' });
+      const activeKey = `${project.id}@${server.repoPath}:Dev-1`;
+      server.chatService.activeTurns = new Map([[activeKey, { controller: new AbortController() }]]);
+      const originalQuiesce = server.chatService.quiesceAgent;
+      server.chatService.quiesceAgent = async (agentId, { projectId: scopedProjectId }) => {
+        const key = `${scopedProjectId}:${agentId}`;
+        scheduler.holdAgent(key);
+        return { quiescent: true };
+      };
+      try {
+        const response = await fetch(`${baseUrl}/api/v1/projects/${target.id}/activate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: true }) });
+        assert.equal(response.status, 200);
+        assert.equal(scheduler.heldAgents.has(`${project.id}:Dev-1`), false);
+        const back = await fetch(`${baseUrl}/api/v1/projects/${project.id}/activate`, { method: 'POST' });
+        assert.equal(back.status, 200);
+      } finally {
+        server.chatService.quiesceAgent = originalQuiesce;
+        server.chatService.activeTurns.clear();
+      }
+    } finally { fs.rmSync(targetDir, { recursive: true, force: true }); }
   });
 
   await t.test('persisted room cutoffs filter matching agent messages in every channel', async () => {
