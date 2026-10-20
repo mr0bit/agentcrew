@@ -445,3 +445,10 @@ entry project before body parsing, recheck after parsing, and contribute to an
 in-flight mutation count until completion. PTY upgrades recheck project identity
 after async agent resolution; project activation rejects while any admitted mutation
 is in flight. Added an HTTP API regression for a project change during body parsing.
+
+Mobile terminal follow-up: restored user zoom in `/terminal`, routed xterm input
+through the mobile Ctrl latch, resized the document to `visualViewport.height`
+on viewport resize/scroll, and added a mobile workspace tools button. Expanded
+`test/ui/mobile-ergonomics.test.js` for these behaviors and for the concurrent
+responsive CSS requirements. Focused test currently awaits the parallel stylesheet
+updates; the terminal and tools-button assertions pass.

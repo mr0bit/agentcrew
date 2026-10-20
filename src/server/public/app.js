@@ -458,7 +458,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function animateElement(element, keyframes, options) {
     if (!element || typeof element.animate !== 'function') return null;
-    return element.animate(keyframes, { easing: motionEase, fill: 'both', ...options });
+    return element.animate(keyframes, { easing: motionEase, fill: 'none', ...options });
   }
 
   function setMobileDrawer(open) {
@@ -471,6 +471,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function switchView(targetViewId) {
+    if (targetViewId === 'view-code-review') targetViewId = 'view-reviews';
     const currentView = document.querySelector('.fullscreen-view.active');
     if (!document.getElementById(targetViewId) || currentView?.id === targetViewId) {
       setMobileDrawer(false);
@@ -511,8 +512,13 @@ document.addEventListener('DOMContentLoaded', () => {
             { opacity: 0, transform: `translateX(${direction * 12}px)`, clipPath: 'inset(0 0 7% 0 round 12px)' },
             { opacity: 1, transform: 'translateX(0)', clipPath: 'inset(0 0 0 0 round 12px)' }
           ],
-      { duration: reducedMotion.matches ? 90 : 180 }
+      { duration: reducedMotion.matches ? 90 : 180, fill: 'none' }
     );
+    if (viewAnimation) {
+      viewAnimation.onfinish = () => {
+        try { viewAnimation.cancel(); } catch (_) {}
+      };
+    }
   }
 
   navTabs.forEach(tab => {
@@ -825,6 +831,11 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function selectPR(pr) {
+    if (typeof pr === 'number' || typeof pr === 'string') {
+      const found = (Array.isArray(analyticsData.pullRequests) ? analyticsData.pullRequests : []).find(p => Number(p.number) === Number(pr));
+      if (found) pr = found;
+    }
+    if (!pr || typeof pr !== 'object') return;
     prPanelReturnFocus = document.activeElement;
     selectedPR = pr;
     document.querySelectorAll('.pr-card-item').forEach(el => {
@@ -1785,7 +1796,7 @@ document.addEventListener('DOMContentLoaded', () => {
       terminalInstance?.focus();
       return;
     }
-    const keys = { escape: '\x1b', tab: '\t', left: '\x1b[D', right: '\x1b[C', up: '\x1b[A', down: '\x1b[B' };
+    const keys = { escape: '\x1b', tab: '\t', left: '\x1b[D', right: '\x1b[C', up: '\x1b[A', down: '\x1b[B', enter: '\r', c: '\x03' };
     controlPending = false;
     const ctrl = mobileKeys?.querySelector('[data-terminal-key="control"]');
     if (ctrl) ctrl.setAttribute('aria-pressed', 'false');
@@ -3703,6 +3714,346 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (btnPopoutTerminal) btnPopoutTerminal.addEventListener('click', openPopoutTerminal);
   if (btnPopoutTerminalTop) btnPopoutTerminalTop.addEventListener('click', openPopoutTerminal);
+
+  // --- Mobile Search Palette & Stage Navigation (TASK-47) ---
+  const mobileSearchBtn = document.getElementById('mobile-search-btn');
+  if (mobileSearchBtn) {
+    mobileSearchBtn.addEventListener('click', () => {
+      openModalDialog({
+        title: 'Global Search',
+        subtitle: 'Search agents, tasks, pull requests, and views',
+        contentHtml: `
+          <div style="display:flex;flex-direction:column;gap:12px;">
+            <input type="search" id="mobile-search-modal-input" placeholder="Type to search…" style="width:100%;padding:10px 14px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:10px;color:#f8fafc;font-size:15px;box-sizing:border-box;">
+            <div id="mobile-search-modal-results" class="mobile-search-results-list" style="max-height:55dvh;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"></div>
+          </div>
+        `,
+        onRender: (body) => {
+          const input = body.querySelector('#mobile-search-modal-input');
+          const results = body.querySelector('#mobile-search-modal-results');
+          if (input && results) {
+            setTimeout(() => input.focus(), 60);
+            const render = (query) => {
+              results.replaceChildren();
+              const q = query.trim().toLowerCase();
+              if (!q) {
+                const hint = document.createElement('div');
+                hint.className = 'search-no-results';
+                hint.textContent = 'Type to search across views, agents, and tasks…';
+                results.appendChild(hint);
+                return;
+              }
+              const matchedViews = [
+                { id: 'view-overview', title: 'Overview Dashboard', meta: 'View' },
+                { id: 'view-team-room', title: 'Cockpit / Team Room', meta: 'View' },
+                { id: 'view-kanban', title: 'Board & Tasks', meta: 'View' },
+                { id: 'view-reviews', title: 'Reviews & Pull Requests', meta: 'View' },
+                { id: 'view-repositories', title: 'Repositories', meta: 'View' },
+                { id: 'view-observability', title: 'Metrics & Observability', meta: 'View' },
+                { id: 'view-settings', title: 'Settings', meta: 'View' }
+              ].filter(v => v.title.toLowerCase().includes(q) || v.id.toLowerCase().includes(q));
+
+              const matchedAgents = (Array.isArray(liveAgents) ? liveAgents : []).filter(a =>
+                (a.name || '').toLowerCase().includes(q) || (a.role || '').toLowerCase().includes(q)
+              ).slice(0, 5);
+
+              const matchedTasks = (Array.isArray(cachedTasks) ? cachedTasks : []).filter(t =>
+                (t.id || '').toLowerCase().includes(q) || (t.title || '').toLowerCase().includes(q)
+              ).slice(0, 5);
+
+              const cachedPRs = Array.isArray(analyticsData.pullRequests) ? analyticsData.pullRequests : [];
+              const matchedPRs = cachedPRs.filter(pr =>
+                (pr.title || '').toLowerCase().includes(q) ||
+                String(pr.number || '').includes(q) ||
+                (pr.author || '').toLowerCase().includes(q) ||
+                (pr.branch || '').toLowerCase().includes(q)
+              ).slice(0, 5);
+
+              if (!matchedViews.length && !matchedAgents.length && !matchedTasks.length && !matchedPRs.length) {
+                const empty = document.createElement('div');
+                empty.className = 'search-no-results';
+                empty.textContent = 'No matching items found.';
+                results.appendChild(empty);
+                return;
+              }
+
+              matchedViews.forEach(v => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                btn.innerHTML = `<span class="result-title">📌 ${escapeHtml(v.title)}</span><span class="result-meta">${escapeHtml(v.meta)}</span>`;
+                btn.addEventListener('click', () => {
+                  switchView(v.id);
+                  closeModalDialog();
+                });
+                results.appendChild(btn);
+              });
+
+              matchedAgents.forEach(a => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                btn.innerHTML = `<span class="result-title">🤖 ${escapeHtml(a.name)}</span><span class="result-meta">${escapeHtml(a.role || 'Agent')}</span>`;
+                btn.addEventListener('click', () => {
+                  switchView('view-team-room');
+                  selectAgent(a);
+                  closeModalDialog();
+                });
+                results.appendChild(btn);
+              });
+
+              matchedTasks.forEach(t => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                btn.innerHTML = `<span class="result-title">📋 ${escapeHtml(t.id)}: ${escapeHtml(t.title)}</span><span class="result-meta">${escapeHtml(t.stage || 'Task')}</span>`;
+                btn.addEventListener('click', () => {
+                  switchView('view-kanban');
+                  const col = document.querySelector(`.kanban-col[data-stage="${t.stage}"]`);
+                  if (col) col.scrollIntoView({ behavior: 'smooth', inline: 'center' });
+                  closeModalDialog();
+                });
+                results.appendChild(btn);
+              });
+
+              matchedPRs.forEach(pr => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                btn.innerHTML = `<span class="result-title">🔀 #${escapeHtml(pr.number)}: ${escapeHtml(pr.title)}</span><span class="result-meta">${escapeHtml(pr.branch || pr.author || 'PR')}</span>`;
+                btn.addEventListener('click', () => {
+                  switchView('view-reviews');
+                  selectPR(pr.number);
+                  closeModalDialog();
+                });
+                results.appendChild(btn);
+              });
+            };
+            input.addEventListener('input', (e) => render(e.target.value));
+            render('');
+          }
+        }
+      });
+    });
+  }
+
+  // --- Mobile Workspace & Tools Sheet (TASK-47) ---
+  let mobileToolsBtn = document.getElementById('mobile-tools-btn');
+  if (!mobileToolsBtn) {
+    const appBarActions = document.querySelector('.mobile-app-bar-actions');
+    if (appBarActions) {
+      mobileToolsBtn = document.createElement('button');
+      mobileToolsBtn.className = 'mobile-icon-btn';
+      mobileToolsBtn.id = 'mobile-tools-btn';
+      mobileToolsBtn.type = 'button';
+      mobileToolsBtn.setAttribute('aria-label', 'Open workspace tools');
+      mobileToolsBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`;
+      const searchBtn = document.getElementById('mobile-search-btn');
+      if (searchBtn && searchBtn.nextSibling) {
+        appBarActions.insertBefore(mobileToolsBtn, searchBtn.nextSibling);
+      } else {
+        appBarActions.appendChild(mobileToolsBtn);
+      }
+    }
+  }
+
+  if (mobileToolsBtn) {
+    mobileToolsBtn.addEventListener('click', async () => {
+      let projects = [];
+      try {
+        const res = await fetch('/api/v1/projects');
+        if (res.ok) {
+          const data = await res.json();
+          projects = Array.isArray(data.projects) ? data.projects : [];
+        }
+      } catch (_) {}
+
+      const projectOptionsHtml = projects.map(p =>
+        `<option value="${escapeHtml(p.id)}"${p.is_active ? ' selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.zone || 'work')})</option>`
+      ).join('');
+
+      openModalDialog({
+        title: 'Workspace & Tools',
+        subtitle: 'Switch active project or execute crew actions',
+        contentHtml: `
+          <div class="mobile-tools-sheet" style="display:flex;flex-direction:column;gap:16px;">
+            <div class="mobile-tools-section" style="display:flex;flex-direction:column;gap:8px;">
+              <label for="mobile-tools-project-select" style="font-size:12px;font-weight:700;letter-spacing:0.05em;color:#94a3b8;text-transform:uppercase;">Active Project</label>
+              <div style="display:flex;gap:8px;">
+                <select id="mobile-tools-project-select" class="form-select" style="flex:1;padding:8px 10px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;font-size:14px;">
+                  ${projectOptionsHtml || '<option value="">Default Project</option>'}
+                </select>
+                <button type="button" id="btn-mobile-new-project" class="btn btn-sm btn-secondary" style="white-space:nowrap;padding:8px 12px;font-size:13px;">+ New</button>
+              </div>
+            </div>
+
+            <div class="mobile-tools-section" style="display:flex;flex-direction:column;gap:8px;">
+              <span style="font-size:12px;font-weight:700;letter-spacing:0.05em;color:#94a3b8;text-transform:uppercase;">Crew & Cockpit Tools</span>
+              <div class="mobile-tools-grid" style="display:grid;grid-template-columns:repeat(2, 1fr);gap:8px;">
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="git" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  📁 Git Changes
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="signals" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  📶 Signals
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="commands" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  ⌨️ Command Runner
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="state" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  📊 Workspace State
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="ideas" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  💡 Ideas
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="broadcast" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  📢 Broadcast to Crew
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="hire" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;grid-column:span 2;">
+                  ✨ Hire Specialist
+                </button>
+              </div>
+            </div>
+          </div>
+        `,
+        onRender: (body) => {
+          const select = body.querySelector('#mobile-tools-project-select');
+          if (select) {
+            select.addEventListener('change', async (e) => {
+              const projId = e.target.value;
+              if (!projId) return;
+              try {
+                const actRes = await fetch(`/api/v1/projects/${encodeURIComponent(projId)}/activate`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' }
+                });
+                if (actRes.ok) {
+                  currentProjectId = projId;
+                  const projectSelector = document.getElementById('project-selector');
+                  if (projectSelector) projectSelector.value = projId;
+                  await loadWorkspace();
+                  await loadProjects();
+                  closeModalDialog();
+                }
+              } catch (err) {
+                console.warn('Failed to switch project:', err);
+              }
+            });
+          }
+
+          const btnNew = body.querySelector('#btn-mobile-new-project');
+          if (btnNew) {
+            btnNew.addEventListener('click', () => {
+              closeModalDialog();
+              const wizard = document.getElementById('project-wizard-modal');
+              if (wizard) wizard.hidden = false;
+            });
+          }
+
+          const getActions = () => window.agentCrewActions || window.agentCrewCockpitActions || {};
+
+          body.querySelectorAll('.mobile-tool-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const tool = btn.dataset.tool;
+              const actions = getActions();
+              closeModalDialog();
+              if (tool === 'git') {
+                if (typeof actions.openFilesDrawer === 'function') actions.openFilesDrawer();
+                else document.getElementById('btn-toggle-files-changes')?.click();
+              } else if (tool === 'signals') {
+                if (typeof actions.openSignals === 'function') actions.openSignals();
+              } else if (tool === 'commands') {
+                if (typeof actions.openCommands === 'function') actions.openCommands();
+                else document.getElementById('btn-utility-commands')?.click();
+              } else if (tool === 'state') {
+                if (typeof actions.openState === 'function') actions.openState();
+              } else if (tool === 'ideas') {
+                if (typeof actions.openIdeas === 'function') actions.openIdeas();
+                else document.getElementById('btn-open-ideas')?.click();
+              } else if (tool === 'broadcast') {
+                if (typeof actions.openBroadcast === 'function') actions.openBroadcast();
+                else document.getElementById('btn-open-broadcast')?.click();
+              } else if (tool === 'hire') {
+                document.querySelector('.roster-quick-icons .plus-btn')?.click();
+              }
+            });
+          });
+        }
+      });
+    });
+  }
+
+  // Mobile Kanban Stage Navigator Pills
+  const kanbanStagePills = document.querySelectorAll('.kanban-stage-pill');
+  if (kanbanStagePills.length > 0) {
+    kanbanStagePills.forEach(pill => {
+      pill.addEventListener('click', () => {
+        kanbanStagePills.forEach(p => {
+          p.classList.remove('active');
+          p.setAttribute('aria-selected', 'false');
+        });
+        pill.classList.add('active');
+        pill.setAttribute('aria-selected', 'true');
+        const stage = pill.dataset.stage;
+        const col = document.querySelector(`.kanban-col[data-stage="${stage}"]`);
+        if (col) {
+          col.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+        }
+      });
+    });
+
+    const kanbanWrapper = document.querySelector('.kanban-fullscreen-wrapper');
+    if (kanbanWrapper && 'IntersectionObserver' in window) {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+            const stage = entry.target.dataset.stage;
+            if (stage) {
+              kanbanStagePills.forEach(p => {
+                const isMatch = p.dataset.stage === stage;
+                p.classList.toggle('active', isMatch);
+                p.setAttribute('aria-selected', String(isMatch));
+              });
+            }
+          }
+        });
+      }, { root: kanbanWrapper, threshold: 0.5 });
+      document.querySelectorAll('.kanban-col').forEach(col => observer.observe(col));
+    }
+  }
+
+  // Mobile Visual Viewport Handling (Virtual Keyboard)
+  function setupVirtualKeyboardHandler() {
+    if (!window.visualViewport) return;
+    const updateViewportVars = () => {
+      const vv = window.visualViewport;
+      if (!vv) return;
+      const height = Math.round(vv.height);
+      const offsetTop = Math.round(vv.offsetTop);
+      document.documentElement.style.setProperty('--vvh', `${height}px`);
+      document.documentElement.style.setProperty('--vvo', `${offsetTop}px`);
+
+      const isKeyboardOpen = window.visualViewport.height < window.innerHeight * 0.82;
+      document.body.classList.toggle('virtual-keyboard-open', isKeyboardOpen);
+      if (isKeyboardOpen && document.activeElement?.id === 'team-chat-input') {
+        const feed = document.getElementById('team-room-chat-feed');
+        if (feed) {
+          requestAnimationFrame(() => {
+            feed.scrollTop = feed.scrollHeight;
+          });
+        }
+      }
+      if (terminalInstance && fitAddon && !terminalEmulator?.hidden) {
+        requestAnimationFrame(() => {
+          try { fitAddon.fit(); } catch (_) {}
+        });
+      }
+    };
+
+    window.visualViewport.addEventListener('resize', updateViewportVars);
+    window.visualViewport.addEventListener('scroll', updateViewportVars);
+    updateViewportVars();
+  }
+  setupVirtualKeyboardHandler();
 
   // --- Initial Boot ---
   updateOverview('week');
