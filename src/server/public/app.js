@@ -1265,6 +1265,7 @@ document.addEventListener('DOMContentLoaded', () => {
         row.type = 'button';
         row.className = `agent-roster-row agentsroom-agent-card ${agent.name === selectedAgentName ? 'selected' : ''}`;
         row.dataset.agentName = agent.name;
+        row.dataset.agentId = agent.id || agent.name;
         row.dataset.status = cardStatus;
         row.setAttribute('aria-pressed', String(agent.name === selectedAgentName));
         row.setAttribute('aria-label', `${agent.name}, ${agent.role || 'Agent'}, ${humanOwned ? 'human owned' : (agentStatusMeta[cardStatus]?.label || cardStatus)}`);
@@ -1344,10 +1345,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (changedAgent && ptySocket) disconnectPty();
     if (changedAgent && backupFeedback) backupFeedback.textContent = '';
     selectedAgentName = agent.name;
+    window.agentCrewCurrentAgent = agent;
     updateAgentWorkspace(agent);
     renderAgentRoster();
     if (takeoverTokens.has(agent.name) && (!ptySocket || changedAgent)) connectPty(agent.name);
   }
+
+  window.agentCrewSelectedAgent = () => {
+    return liveAgents.find(item => item.name === selectedAgentName) || window.agentCrewCurrentAgent || liveAgents[0] || null;
+  };
+  window.agentCrewRefreshAgents = loadAgents;
 
   function selectAgentByName(name) {
     selectAgent(name);

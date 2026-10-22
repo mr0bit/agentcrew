@@ -844,11 +844,12 @@ class SupervisorServer {
     }
 
     if (pathname === '/api/v1/readiness' && method === 'GET') {
-      const readiness = this.workspace && this.projectId
-        ? await this.workspace.checkReadiness(this.projectId)
+      const currentProjectId = this.activeProjectId || this.projectId;
+      const readiness = this.workspace && currentProjectId
+        ? await this.workspace.checkReadiness(currentProjectId)
         : { databaseReady: true, rosterCount: 13 };
       const providers = await this.chatService.probeProviders();
-      const agents = this.workspace && this.projectId ? await this.workspace.listAgents(this.projectId) : [];
+      const agents = this.workspace && currentProjectId ? await this.workspace.listAgents(currentProjectId) : [];
       for (const provider of providers) {
         provider.agents = agents.filter((agent) => agent.provider === provider.name).map((agent) => agent.name);
       }
@@ -873,7 +874,8 @@ class SupervisorServer {
     }
 
     if (pathname === '/api/v1/agents' && method === 'GET') {
-      const agents = this.workspace && this.projectId ? await this.workspace.listAgents(this.projectId) : [];
+      const currentProjectId = this.activeProjectId || this.projectId;
+      const agents = this.workspace && currentProjectId ? await this.workspace.listAgents(currentProjectId) : [];
       const providerReports = await this.chatService.probeProviders();
       const providerAvailable = new Map(providerReports.map((report) => [report.name, report.available]));
       const stations = this.teamRoom.getStations();
@@ -1122,18 +1124,24 @@ class SupervisorServer {
         if (!this.workspace || !commandProjectId) throw Object.assign(new Error('Workspace is unavailable'), { statusCode: 503 });
         const agentId = (await this.chatService.resolveAgent(payload.agent_id, { projectId: commandProjectId })).name;
         const activeTurn = [...(this.chatService.activeTurns || new Map()).keys()].some((key) => key.startsWith(`${commandProjectId}@`) && key.endsWith(`:${agentId}`));
-        if (this.agentTerminals.has(agentId) || this.takeoverController?.getState?.(agentId) === 'human_owned' || (command_type === 'agent.configure' && activeTurn)) throw Object.assign(new Error('Agent has active work or terminal'), { statusCode: 409, code: 'AGENT_ACTIVE' });
+        if (this.takeoverController?.getState?.(agentId) === 'human_owned' || activeTurn) throw Object.assign(new Error('Agent has active work in progress'), { statusCode: 409, code: 'AGENT_ACTIVE' });
         if (command_type === 'agent.configure') {
           const { DatabaseSync } = require('node:sqlite');
           const dbPath = path.join(this.workspace.baseDir, 'projects', commandProjectId, 'agentcrew.db');
           const db = new DatabaseSync(dbPath);
           try {
             const provider = payload.provider;
-            const model = payload.model;
+            const model = payload.model !== undefined ? payload.model : null;
             if (provider && !['agy', 'codex', 'gemini'].includes(provider)) throw Object.assign(new Error('Unsupported provider'), { statusCode: 400 });
             if (model && (typeof model !== 'string' || model.length > 120)) throw Object.assign(new Error('Invalid model'), { statusCode: 400 });
             db.prepare('UPDATE agents SET role = COALESCE(?, role), provider = COALESCE(?, provider), model = COALESCE(?, model) WHERE project_id = ? AND (id = ? OR name = ?)').run(payload.role || null, provider || null, model || null, commandProjectId, agentId, agentId);
           } finally { db.close(); }
+          if (payload.backup_provider !== undefined || payload.backup_model !== undefined) {
+            await this.workspace.setAgentProviderConfig(commandProjectId, agentId, {
+              backupProvider: payload.backup_provider || null,
+              backupModel: payload.backup_model || null,
+            });
+          }
           result = (await this.workspace.listAgents(commandProjectId)).find((agent) => agent.name === agentId);
           this.broadcastEvent('agent.updated', { agent: result, project_id: commandProjectId });
         } else {

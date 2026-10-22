@@ -152,3 +152,45 @@ test('Share transcript fetches room messages and opens export options without re
   assert.equal(document.querySelector('#shared-dialog-title').textContent, 'Share & Export');
   assert.ok(document.querySelector('#shared-dialog-body').textContent.includes('1 messages loaded.'));
 });
+
+test('Agent Configuration dialog pre-populates fields, binds to selected agent and saves configuration', async () => {
+  const commands = [];
+  const browser = loadBrowser(async (url, options) => {
+    if (url === '/api/v1/commands') commands.push(JSON.parse(options.body));
+    return { ok: true, status: 200, json: async () => ({ preferences: {}, result: { role: 'PO Lead', provider: 'codex', model: 'gpt-6', backup_provider: 'agy', backup_model: 'gemini-2.5-pro' } }) };
+  });
+  const { context, listeners, document, Node } = browser;
+  context.window.agentCrewSelectedAgent = () => ({
+    id: 'agent-peter-123',
+    name: 'Peter',
+    role: 'Product Owner',
+    provider: 'agy',
+    model: 'gemini-2.5-pro',
+    backup_provider: 'codex',
+    backup_model: 'gpt-6'
+  });
+  listeners.DOMContentLoaded[0]();
+
+  const rolePill = new Node('div');
+  rolePill.id = 'agent-role-pill';
+  rolePill.className = 'dropdown-pill role-dropdown';
+  document.body.append(rolePill);
+
+  await listeners.click[0]({ target: rolePill });
+  assert.equal(document.querySelector('#shared-dialog-title').textContent, 'Agent Configuration: Peter');
+
+  const selects = document.querySelector('#shared-dialog-body').querySelectorAll('select');
+  assert.equal(selects.length, 2, 'Must have primary and backup provider selects');
+  assert.equal(selects[0].value, 'agy');
+
+  // Change to codex
+  selects[0].value = 'codex';
+  const saveBtn = document.querySelector('#shared-dialog-body').querySelectorAll('button').find(b => b.textContent === 'Save configuration');
+  assert.ok(saveBtn);
+  await saveBtn.click();
+
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].command_type, 'agent.configure');
+  assert.equal(commands[0].payload.agent_id, 'agent-peter-123');
+  assert.equal(commands[0].payload.provider, 'codex');
+});

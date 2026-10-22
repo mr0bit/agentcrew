@@ -452,3 +452,12 @@ on viewport resize/scroll, and added a mobile workspace tools button. Expanded
 `test/ui/mobile-ergonomics.test.js` for these behaviors and for the concurrent
 responsive CSS requirements. Focused test currently awaits the parallel stylesheet
 updates; the terminal and tools-button assertions pass.
+
+## 2026-10-22
+
+Diagnosed and resolved agent provider dispatch failure and Agent Configuration modal bugs:
+- Fixed Codex stderr banner masking: Codex outputs `Reading additional input from stdin...` on piped stdin; ChatService now filters this banner and inspects stdout JSON events for actual error payloads.
+- Added `--skip-git-repo-check` to `CodexAdapter.buildSpawnArgs()` preventing safe.directory errors on virtual/external filesystem mounts.
+- Added support for `agy` JSON stream responses (`event: result -> result.response` and `step_update.text_delta`) in both `AgyAdapter.parseStreamEvent()` and `ChatService`.
+- Fixed Agent Configuration UI/backend sync: `app.js` sets `row.dataset.agentId` and exposes `window.agentCrewSelectedAgent()`; `cockpit-actions.js` uses select dropdowns for primary and backup providers, pre-populating current role/model/provider; `agent.configure` persists atomic primary & backup provider settings; removed false-positive 409 rejection when idle monitoring terminals are connected.
+- Verified end-to-end live conversational turns for Peter via both `agy` and `codex`. 152/152 tests passing green. Server restarted on port 3000.

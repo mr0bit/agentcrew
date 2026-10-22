@@ -282,6 +282,8 @@ class ChatService {
             }
             const normalized = adapter.parseStreamEvent(line) || event;
             let text = normalized.type === 'message.assistant' ? normalized.text : null;
+            if (!text && typeof event.step_update?.text_delta === 'string') text = event.step_update.text_delta;
+            if (!text && typeof event.result?.response === 'string') text = event.result.response;
             if (!text && typeof event.delta === 'string') text = event.delta;
             if (!text && typeof event.text_delta === 'string') text = event.text_delta;
             if (text) {
@@ -307,8 +309,14 @@ class ChatService {
           // Model selection: only apply model if calling assigned provider, and avoid obsolete/unsupported placeholders
           let modelArg = null;
           const configuredModel = name === agent.provider ? agent.model : agent.backupModel;
-          if (configuredModel && (name !== agent.provider || (configuredModel !== 'gemini-2.5-pro' && configuredModel !== 'o3'))) {
-            modelArg = configuredModel;
+          if (configuredModel) {
+            if (name === 'codex' && (configuredModel === 'gemini-2.5-pro' || configuredModel === 'flash-3.8' || configuredModel === 'gpt-4o')) {
+              modelArg = null;
+            } else if (name === 'agy' && (configuredModel === 'o3' || configuredModel === 'gpt-4o' || configuredModel === 'gpt-4.1')) {
+              modelArg = null;
+            } else if (name !== agent.provider || (configuredModel !== 'gemini-2.5-pro' && configuredModel !== 'o3')) {
+              modelArg = configuredModel;
+            }
           }
 
           const resumeFrom = (existingSession && existingSession.provider === name)
@@ -361,13 +369,16 @@ class ChatService {
               } catch (_) {
                 continue;
               }
-              if (data.conversation_id) {
+              const convId = data.conversation_id || data.result?.conversation_id || data.init?.conversation_id;
+              if (convId) {
                 await this.saveAgentSession(agent.name, {
                   provider: 'agy',
-                  sessionId: data.conversation_id,
+                  sessionId: convId,
                 }, { projectId, repoPath });
               }
-              if (data.response) {
+              if (data.result?.response) {
+                text = data.result.response.trim();
+              } else if (data.response) {
                 text = data.response.trim();
               }
             }
@@ -438,11 +449,41 @@ class ChatService {
             }
           }
 
+          const cleanStderr = (result?.stderr || '')
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => l && !l.includes('Reading additional input from stdin') && !l.includes('Reading prompt from stdin'))
+            .join(' ');
+
+          let errorFromOutput = '';
+          if (!cleanStderr && result?.stdout) {
+            for (const line of result.stdout.split(/\r?\n/)) {
+              try {
+                const parsed = JSON.parse(line.trim());
+                if (parsed.type === 'error' && parsed.message) {
+                  try {
+                    const inner = JSON.parse(parsed.message);
+                    errorFromOutput = inner?.error?.message || parsed.message;
+                  } catch {
+                    errorFromOutput = parsed.message;
+                  }
+                } else if (parsed.type === 'turn.failed' && parsed.error?.message) {
+                  try {
+                    const inner = JSON.parse(parsed.error.message);
+                    errorFromOutput = inner?.error?.message || parsed.error.message;
+                  } catch {
+                    errorFromOutput = parsed.error.message;
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+
           const why = result?.code === 0 && !streamedText
             ? 'no readable assistant response'
             : result?.timedOut
             ? 'timed out'
-            : ((result?.stderr || '').split('\n')[0] || `exit ${result?.code}`);
+            : (cleanStderr || errorFromOutput || (result?.code != null ? `exit ${result.code}` : 'execution failed'));
           errors.push(`${name}: ${why}`);
           if (streamedText) options.onRetry?.(name);
           if (isQuotaError(`${result?.stderr || ''} ${result?.stdout || ''}`)) {

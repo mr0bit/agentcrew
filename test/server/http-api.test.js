@@ -289,12 +289,14 @@ test('SupervisorServer serves TRD §12 API routes and SSE stream', async (t) => 
   await t.test('typed team, specialist and session commands make observable changes', async () => {
     const configure = await fetch(`${baseUrl}/api/v1/commands`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command_type: 'agent.configure', payload: { agent_id: 'Dev-2', role: 'Developer', provider: 'agy', model: 'safe-model' } })
+      body: JSON.stringify({ command_type: 'agent.configure', payload: { agent_id: 'Dev-2', role: 'Developer', provider: 'agy', model: 'safe-model', backup_provider: 'codex', backup_model: 'o3' } })
     });
     assert.equal(configure.status, 200);
     const configured = (await server.workspace.listAgents(project.id)).find((agent) => agent.name === 'Dev-2');
     assert.equal(configured.provider, 'agy');
     assert.equal(configured.model, 'safe-model');
+    assert.equal(configured.backup_provider, 'codex');
+    assert.equal(configured.backup_model, 'o3');
 
     const hire = await fetch(`${baseUrl}/api/v1/commands`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

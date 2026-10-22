@@ -47,6 +47,9 @@ class CodexAdapter {
     // Enforce roster-only delegation by disabling multi-agent sub-agents
     args.push('-c', 'features.multi_agent=false');
 
+    // Always skip git repo check to prevent safe.directory failures on external/virtual mounts
+    args.push('--skip-git-repo-check');
+
     if (resumeFrom) {
       args.push('resume', resumeFrom);
     }

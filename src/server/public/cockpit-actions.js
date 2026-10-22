@@ -74,9 +74,15 @@
     const blob = new Blob([contents], { type }); const link = el('a'); link.href = URL.createObjectURL(blob); link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   }
   function selected() {
+    const live = window.agentCrewSelectedAgent?.();
+    if (live && live.name) {
+      return { name: live.name, id: live.id || live.name };
+    }
     const name = $('#selected-agent-name')?.textContent?.trim();
     const card = $$('.agentsroom-agent-card, .agent-roster-row').find(item => item.classList.contains('selected'));
-    return { name: state.selectedAgent || name || '', id: state.selectedAgentId || card?.dataset?.agentId || name || '' };
+    const agentName = state.selectedAgent || name || card?.dataset?.agentName || '';
+    const agentId = state.selectedAgentId || card?.dataset?.agentId || agentName;
+    return { name: agentName, id: agentId };
   }
   async function messages(channel = state.channel, includeCleared = false) { const result = await api(`/api/v1/room/messages?channel=${encodeURIComponent(channel)}${includeCleared ? '&include_cleared=1' : ''}`); return result.messages || []; }
   function messageText(items) { return items.map(m => `[${m.created_at || ''}] ${m.sender_name || m.sender_id || 'Unknown'}: ${m.text || ''}`).join('\n'); }
@@ -146,15 +152,69 @@
   }
   function openMore() {
     const body = el('div');
+    body.append(button('Configure Agent', openAgentConfig));
     body.append(button('Export Transcript (JSON)', async () => { try { download('transcript.json', JSON.stringify(await exportMessages(), null, 2), 'application/json'); } catch (e) { errorLine(body, e); } }), button('Export Transcript (Markdown)', async () => { try { download('transcript.md', messageText(await exportMessages()), 'text/markdown'); } catch (e) { errorLine(body, e); } }));
     for (const [label, type] of [['Clear Session View', 'session.clear_view'], ['Reset Conversation', 'session.reset']]) body.append(button(label, async () => { try { await command(type, { agent_id: selected().id }); if (window.agentCrewReloadFeed) window.agentCrewReloadFeed(); else await loadFeed(); toast(`${label} completed.`); hideDialog(); } catch (e) { errorLine(body, e); } }));
     showDialog('More Options', body);
   }
   function openAgentConfig() {
-    const agent = selected(), box = el('div'); const role = field('Role'), model = field('Model'), provider = field('Provider');
-    role.input.value = $('#selected-agent-role')?.textContent?.trim() || ''; model.input.value = $('#selected-agent-model')?.textContent?.trim() || '';
-    provider.input.setAttribute('list', 'cockpit-provider-list'); const list = el('datalist', undefined, { id: 'cockpit-provider-list' }); ['agy', 'codex', 'gemini'].forEach(x => list.append(el('option', undefined, { value: x })));
-    box.append(role.wrap, model.wrap, provider.wrap, list); box.append(button('Save configuration', async () => { try { const result = await command('agent.configure', { agent_id: agent.id, role: role.input.value, model: model.input.value, provider: provider.input.value }); const updated = result.result || {}; if ($('#selected-agent-role')) $('#selected-agent-role').textContent = updated.role || role.input.value; if ($('#selected-agent-model')) $('#selected-agent-model').textContent = updated.model || model.input.value; if ($('#selected-agent-provider')) $('#selected-agent-provider').textContent = updated.provider || provider.input.value; window.agentCrewRefreshAgents?.(); toast('Agent configuration saved.'); hideDialog(); } catch (e) { errorLine(box, e); } })); showDialog('Agent Configuration', box);
+    const agent = selected();
+    const live = window.agentCrewSelectedAgent?.() || {};
+    const box = el('div');
+    const role = field('Role');
+    const model = field('Model');
+
+    const providerWrap = el('label', 'Primary CLI Provider');
+    const providerSelect = el('select', undefined, { 'aria-label': 'Primary CLI Provider', class: 'cockpit-input' });
+    ['agy', 'codex', 'gemini'].forEach(x => {
+      const opt = el('option', x.toUpperCase(), { value: x });
+      providerSelect.append(opt);
+    });
+    providerWrap.append(providerSelect);
+
+    const backupWrap = el('label', 'Backup CLI Provider (Optional)');
+    const backupSelect = el('select', undefined, { 'aria-label': 'Backup CLI Provider', class: 'cockpit-input' });
+    backupSelect.append(el('option', 'None (strict)', { value: '' }));
+    ['agy', 'codex', 'gemini'].forEach(x => {
+      const opt = el('option', x.toUpperCase(), { value: x });
+      backupSelect.append(opt);
+    });
+    backupWrap.append(backupSelect);
+
+    const backupModel = field('Backup Model (Optional)');
+
+    const currentProvider = (live.provider || $('#selected-agent-provider')?.textContent?.trim() || 'agy').toLowerCase();
+    providerSelect.value = ['agy', 'codex', 'gemini'].includes(currentProvider) ? currentProvider : 'agy';
+    backupSelect.value = (live.backup_provider || '').toLowerCase();
+
+    role.input.value = live.role || $('#selected-agent-role')?.textContent?.trim() || '';
+    model.input.value = live.model || $('#selected-agent-model')?.textContent?.trim() || '';
+    backupModel.input.value = live.backup_model || '';
+
+    box.append(role.wrap, providerWrap, model.wrap, backupWrap, backupModel.wrap);
+    box.append(button('Save configuration', async () => {
+      try {
+        const payload = {
+          agent_id: agent.id || agent.name,
+          role: role.input.value.trim(),
+          provider: providerSelect.value,
+          model: model.input.value.trim(),
+          backup_provider: backupSelect.value || null,
+          backup_model: backupModel.input.value.trim() || null,
+        };
+        const result = await command('agent.configure', payload);
+        const updated = result.result || {};
+        if ($('#selected-agent-role')) $('#selected-agent-role').textContent = updated.role || role.input.value;
+        if ($('#selected-agent-model')) $('#selected-agent-model').textContent = updated.model || model.input.value;
+        if ($('#selected-agent-provider')) $('#selected-agent-provider').textContent = (updated.provider || providerSelect.value).toUpperCase();
+        window.agentCrewRefreshAgents?.();
+        toast('Agent configuration saved.');
+        hideDialog();
+      } catch (e) {
+        errorLine(box, e);
+      }
+    }));
+    showDialog(`Agent Configuration: ${agent.name || 'Selected Agent'}`, box);
   }
   async function openCommands() {
     const box = el('div'); showDialog('Command Runner', box);
@@ -196,12 +256,12 @@
     const kanbanControls = $('#view-kanban .view-header .view-controls') || $('#view-kanban .view-header');
     if (kanbanControls && !$('#btn-kanban-new-task')) kanbanControls.append(button('+ New Task', openNewTask, { id: 'btn-kanban-new-task', class: 'btn btn-primary btn-sm' }));
     document.addEventListener('click', async event => {
-      const target = event.target.closest('button, [role="button"], .task-card, .task-item, .status-summary-item, #btn-open-backlog, #btn-open-ideas'); if (!target) return;
+      const target = event.target.closest('button, [role="button"], .task-card, .task-item, .status-summary-item, #btn-open-backlog, #btn-open-ideas, #agent-role-pill, #agent-model-pill, .role-dropdown, .model-dropdown'); if (!target) return;
       const title = target.getAttribute('title') || '';
       if (target.matches(".agent-workspace-actions button[title='Session Link']")) { const url = new URL(location.href); url.searchParams.set('agent', selected().name); let project = new URLSearchParams(location.search).get('project'); if (!project) { try { project = (await api('/api/v1/health')).project_id; } catch (_) {} } if (project) url.searchParams.set('project', project); await copy(url.href); }
       else if (target.matches(".agent-workspace-actions button[title='Copy Output']")) await copy($$('#team-room-chat-feed .cockpit-message, #team-room-chat-feed [data-message-id]').map(x => x.textContent.trim()).join('\n') || $('#team-room-chat-feed')?.textContent?.trim() || '');
       else if (target.matches(".agent-workspace-actions button[title='Share via Email']")) openTranscript(); else if (target.matches(".agent-workspace-actions button[title='More Options']")) openMore();
-      else if (target.id === 'agent-role-pill' || target.id === 'agent-model-pill') openAgentConfig();
+      else if (target.id === 'agent-role-pill' || target.id === 'agent-model-pill' || target.classList.contains('role-dropdown') || target.classList.contains('model-dropdown')) openAgentConfig();
       else if (target.id === 'btn-utility-commands') openCommands(); else if (target.id === 'btn-utility-servers') openHealth(); else if (target.id === 'btn-utility-databases') openState();
       else if (title === 'Fast Execution' || title === 'Turbo turns') toggleTurbo(); else if (title === 'Tags') openTags(); else if (title === 'Split Screen') toggleSplit();
       else if (target.id === 'btn-toggle-files-changes') openGit(); else if (title === 'Collapse Rail') $('#dock-rail-right')?.classList.toggle('collapsed');
