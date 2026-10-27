@@ -931,4 +931,43 @@ test('SupervisorServer serves TRD §12 API routes and SSE stream', async (t) => 
       });
     });
   });
+
+  await t.test('GET /api/v1/team-presets returns team preset catalog', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/team-presets`);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.ok(Array.isArray(data.presets));
+    assert.ok(data.presets.some(p => p.id === 'lean' && p.agentCount === 3));
+    assert.ok(data.presets.some(p => p.id === 'agile' && p.agentCount === 6));
+    assert.ok(data.presets.some(p => p.id === 'enterprise' && p.agentCount === 13));
+  });
+
+  await t.test('GET /api/v1/fs/browse and POST /api/v1/fs/mkdir manage local directories safely', async () => {
+    const testDir = path.join(os.tmpdir(), 'agentcrew-browse-test-' + Date.now());
+    fs.mkdirSync(testDir, { recursive: true });
+    const sub1 = path.join(testDir, 'sub-folder');
+    fs.mkdirSync(sub1, { recursive: true });
+
+    // Browse directory
+    const browseRes = await fetch(`${baseUrl}/api/v1/fs/browse?dir=${encodeURIComponent(testDir)}`);
+    assert.equal(browseRes.status, 200);
+    const browseData = await browseRes.json();
+    assert.equal(browseData.current, testDir);
+    assert.ok(browseData.directories.some(d => d.name === 'sub-folder'));
+
+    // Mkdir via API
+    const newDir = path.join(testDir, 'created-via-api');
+    const mkRes = await fetch(`${baseUrl}/api/v1/fs/mkdir`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: newDir, init_git: true })
+    });
+    assert.equal(mkRes.status, 200);
+    const mkData = await mkRes.json();
+    assert.equal(mkData.status, 'ok');
+    assert.ok(fs.existsSync(newDir));
+    assert.ok(fs.existsSync(path.join(newDir, '.git')));
+
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
 });

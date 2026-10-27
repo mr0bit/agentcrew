@@ -477,6 +477,18 @@ Session opened with `docs/memory/MEMORY.md` and `docs/memory/MEMORY_SHORTTERM.md
 Verified 152/152 tests passing green on Node v24.22.0. Current branch
 `feat/task-37-multi-project-registry` is ahead of remote by 8 commits. Evaluated Milestone
 m-3 (AgentsRoom Cockpit & Specialist Store) queue: TASK-40 through TASK-55 pending in backlog.
-Ready for specialist catalog & store API implementation or PR creation.
+Unified all commits into consolidated branch `feat/cockpit-functionality-and-mobile-ergonomics`
+and opened GitHub Pull Request #21. Started background supervisor daemon on port 3000.
+
+## 2026-10-28
+
+Addressed human review remarks from testing in an iterative loop:
+1. **Full-width Cockpit Scaling (Remark 1)**: Overrode `.fullscreen-view` 1540px ceiling on `#view-team-room.active` with `max-width: none !important; width: 100% !important;`, expanding the canvas to 1868px on 1920x1080 displays with 0px wasted margin. Defaulted initial load view to Cockpit.
+2. **Directory Browser & Folder Creation (Remark 2)**: Added backend endpoints `GET /api/v1/fs/browse` and `POST /api/v1/fs/mkdir` with git init support. Added modal folder browser with parent traversal and new folder creation, plus inline missing directory detection banner with one-click folder creation.
+3. **Project Dock Icon Spacing (Remark 3)**: Fixed missing `.dock-zone-group` styles in `style.css` with uniform 8px gap between items and 16px between zones. Verified bounding boxes via headless Playwright snapshot loop.
+4. **Guided Team Composition Journey (Remark 4)**: Transformed Onboarding Wizard into a 3-step Journey (Step 1: Project & Folder -> Step 2: Team Roster Selection: Lean 3-agent Squad, Agile 6-agent Feature Team, Full Enterprise 13-agent Crew -> Step 3: Review & Launch). Created `src/workspace/team-presets.js` and wired preset seeding into project SQLite database.
+5. **Delegation Skills**: Installed `codex-delegate` and `agy-delegate` into `.agents/skills/`. Conducted architectural debate via Codex CLI (`gpt-6-luna`).
+155/155 tests passing green. Server daemon restarted and verified with live Playwright snapshots.
+
 
 

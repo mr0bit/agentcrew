@@ -646,6 +646,71 @@ class SupervisorServer {
       });
     }
 
+    if (pathname === '/api/v1/team-presets' && method === 'GET') {
+      const { TEAM_PRESETS } = require('../workspace/team-presets');
+      return this.jsonResponse(res, 200, { presets: Object.values(TEAM_PRESETS) });
+    }
+
+    if (pathname === '/api/v1/fs/browse' && method === 'GET') {
+      const requestedDir = parsedUrl.searchParams.get('dir') || process.env.HOME || process.cwd();
+      try {
+        const resolved = path.resolve(requestedDir);
+        if (!fs.existsSync(resolved)) {
+          return this.jsonResponse(res, 404, { error: `Directory does not exist: ${requestedDir}` });
+        }
+        const stat = fs.statSync(resolved);
+        if (!stat.isDirectory()) {
+          return this.jsonResponse(res, 400, { error: 'Path is not a directory' });
+        }
+        const entries = fs.readdirSync(resolved, { withFileTypes: true });
+        const directories = entries
+          .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+          .map(e => ({
+            name: e.name,
+            path: path.join(resolved, e.name),
+            is_git_repo: fs.existsSync(path.join(resolved, e.name, '.git'))
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        const parent = path.dirname(resolved) !== resolved ? path.dirname(resolved) : null;
+        return this.jsonResponse(res, 200, {
+          current: resolved,
+          parent,
+          is_git_repo: fs.existsSync(path.join(resolved, '.git')),
+          directories
+        });
+      } catch (err) {
+        return this.jsonResponse(res, 500, { error: err.message });
+      }
+    }
+
+    if (pathname === '/api/v1/fs/mkdir' && method === 'POST') {
+      if (req.headers['content-type'] && !req.headers['content-type'].includes('application/json')) {
+        return this.jsonResponse(res, 415, { error: 'Content-Type must be application/json' });
+      }
+      try {
+        const body = await this.readJsonBody(req);
+        if (!body.path || typeof body.path !== 'string') {
+          return this.jsonResponse(res, 400, { error: 'path is required' });
+        }
+        const resolved = path.resolve(body.path);
+        fs.mkdirSync(resolved, { recursive: true });
+        let gitInitialized = false;
+        if (body.init_git || !fs.existsSync(path.join(resolved, '.git'))) {
+          const { spawnSync } = require('node:child_process');
+          const gitRes = spawnSync('git', ['init'], { cwd: resolved, stdio: 'ignore' });
+          gitInitialized = gitRes.status === 0;
+        }
+        return this.jsonResponse(res, 200, {
+          status: 'ok',
+          path: resolved,
+          git_initialized: gitInitialized
+        });
+      } catch (err) {
+        return this.jsonResponse(res, 400, { error: err.message });
+      }
+    }
+
     if (pathname === '/api/v1/projects' && method === 'GET') {
       const projects = this.workspace ? await this.workspace.listProjects() : [];
       return this.jsonResponse(res, 200, { projects });

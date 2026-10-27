@@ -2133,7 +2133,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (zoneProjects.length === 0) return;
 
       const group = document.createElement('div');
-      group.className = 'dock-zone-group';
+      group.className = 'dock-zone-group project-zone-group';
 
       zoneProjects.forEach(proj => {
         const item = document.createElement('button');
@@ -3592,10 +3592,281 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // --- Multi-Step Onboarding Journey & Folder Browser ---
+  let wizardStep = 1;
+  let selectedTeamPreset = 'lean';
+  let browserCurrentDir = '';
+
+  const wizardSubtitle = document.getElementById('wizard-modal-subtitle');
+  const btnWizardBack = document.getElementById('btn-wizard-back');
+  const btnWizardNext = document.getElementById('btn-wizard-next');
+  const btnSubmitWizard = document.getElementById('btn-submit-project-wizard');
+  const btnBrowseFolder = document.getElementById('btn-browse-folder');
+  const pathMissingBanner = document.getElementById('path-missing-banner');
+  const btnCreateMissingFolder = document.getElementById('btn-create-missing-folder');
+  const teamPresetCards = document.querySelectorAll('.team-preset-card');
+
+  const folderBrowserModal = document.getElementById('folder-browser-modal');
+  const btnCloseFolderBrowser = document.getElementById('btn-close-folder-browser');
+  const btnCancelFolderBrowser = document.getElementById('btn-cancel-folder-browser');
+  const browserCurrentPath = document.getElementById('browser-current-path');
+  const browserDirList = document.getElementById('browser-dir-list');
+  const btnBrowserParent = document.getElementById('btn-browser-parent');
+  const browserGitIndicator = document.getElementById('browser-git-indicator');
+  const btnBrowserCreateFolder = document.getElementById('btn-browser-create-folder');
+  const browserNewFolderName = document.getElementById('browser-new-folder-name');
+  const btnSelectCurrentFolder = document.getElementById('btn-select-current-folder');
+
+  const presetDefinitions = {
+    lean: {
+      title: '🚀 Lean Dev & Test Squad',
+      count: '3 Agents',
+      members: [
+        { name: 'Dev-1', role: 'Developer' },
+        { name: 'QA-1', role: 'Tester' },
+        { name: 'Integrator-1', role: 'Integrator' }
+      ]
+    },
+    agile: {
+      title: '⚡ Agile Feature Team',
+      count: '6 Agents',
+      members: [
+        { name: 'Peter', role: 'PO' },
+        { name: 'Arthur', role: 'Architect' },
+        { name: 'Dev-1', role: 'Dev' },
+        { name: 'Dev-2', role: 'Dev' },
+        { name: 'QA-1', role: 'Tester' },
+        { name: 'Integrator-1', role: 'Integrator' }
+      ]
+    },
+    enterprise: {
+      title: '🏛️ Full Enterprise Crew',
+      count: '13 Agents',
+      members: [
+        { name: 'Alice', role: 'BA' },
+        { name: 'Peter', role: 'PO' },
+        { name: 'Arthur', role: 'Architect' },
+        { name: 'Dev-1..4', role: '4 Devs' },
+        { name: 'QA-1..4', role: '4 Testers' },
+        { name: 'Integrator-1..2', role: '2 Integrators' }
+      ]
+    }
+  };
+
+  function setWizardStep(step) {
+    wizardStep = step;
+    [1, 2, 3].forEach(s => {
+      const panel = document.getElementById(`wizard-step-panel-${s}`);
+      const node = document.getElementById(`step-node-${s}`);
+      if (panel) panel.hidden = s !== wizardStep;
+      if (node) {
+        node.classList.toggle('active', s === wizardStep);
+        node.classList.toggle('completed', s < wizardStep);
+      }
+    });
+
+    if (btnWizardBack) btnWizardBack.hidden = wizardStep === 1;
+    if (btnWizardNext) btnWizardNext.hidden = wizardStep === 3;
+    if (btnSubmitWizard) btnSubmitWizard.hidden = wizardStep !== 3;
+
+    if (wizardSubtitle) {
+      if (wizardStep === 1) wizardSubtitle.textContent = 'Step 1 of 3: Repository & Configuration';
+      else if (wizardStep === 2) wizardSubtitle.textContent = 'Step 2 of 3: Team Roster Composition';
+      else if (wizardStep === 3) wizardSubtitle.textContent = 'Step 3 of 3: Review & Launch';
+    }
+
+    if (wizardStep === 3) {
+      const name = document.getElementById('wizard-project-name')?.value?.trim() || 'New Project';
+      const pathVal = document.getElementById('wizard-project-path')?.value?.trim() || '';
+      const zoneVal = document.getElementById('wizard-project-zone')?.value || 'work';
+      const preset = presetDefinitions[selectedTeamPreset] || presetDefinitions.lean;
+
+      const summaryName = document.getElementById('summary-project-name');
+      const summaryZone = document.getElementById('summary-project-zone');
+      const summaryPath = document.getElementById('summary-project-path');
+      const summaryTeamName = document.getElementById('summary-team-name');
+      const summaryTeamCount = document.getElementById('summary-team-count');
+      const summaryRoster = document.getElementById('summary-team-roster');
+
+      if (summaryName) summaryName.textContent = name;
+      if (summaryZone) summaryZone.textContent = zoneVal.toUpperCase();
+      if (summaryPath) summaryPath.textContent = pathVal;
+      if (summaryTeamName) summaryTeamName.textContent = preset.title;
+      if (summaryTeamCount) summaryTeamCount.textContent = preset.count;
+      if (summaryRoster) {
+        summaryRoster.innerHTML = preset.members.map(m => `
+          <span class="preset-member-pill"><strong>${escapeHtml(m.name)}</strong> <span class="preset-member-role">(${escapeHtml(m.role)})</span></span>
+        `).join('');
+      }
+    }
+  }
+
+  // Preset selection click
+  teamPresetCards.forEach(card => {
+    card.addEventListener('click', () => {
+      teamPresetCards.forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      selectedTeamPreset = card.dataset.preset || 'lean';
+    });
+  });
+
+  // Step navigation buttons
+  btnWizardNext?.addEventListener('click', async () => {
+    if (wizardStep === 1) {
+      const name = document.getElementById('wizard-project-name')?.value?.trim();
+      const pathVal = document.getElementById('wizard-project-path')?.value?.trim();
+      if (!name) {
+        document.getElementById('wizard-project-name')?.focus();
+        return;
+      }
+      if (!pathVal) {
+        document.getElementById('wizard-project-path')?.focus();
+        return;
+      }
+      // Check if folder exists
+      try {
+        const checkRes = await fetch(`/api/v1/fs/browse?dir=${encodeURIComponent(pathVal)}`);
+        if (!checkRes.ok && checkRes.status === 404) {
+          pathMissingBanner.hidden = false;
+          return;
+        } else {
+          pathMissingBanner.hidden = true;
+        }
+      } catch (_) {}
+      setWizardStep(2);
+    } else if (wizardStep === 2) {
+      setWizardStep(3);
+    }
+  });
+
+  btnWizardBack?.addEventListener('click', () => {
+    if (wizardStep > 1) setWizardStep(wizardStep - 1);
+  });
+
+  // Inline "Create Folder & Init Git" button
+  btnCreateMissingFolder?.addEventListener('click', async () => {
+    const pathVal = document.getElementById('wizard-project-path')?.value?.trim();
+    if (!pathVal) return;
+    try {
+      const res = await fetch('/api/v1/fs/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: pathVal, init_git: true })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to create folder');
+      pathMissingBanner.hidden = true;
+      log(`Created folder & git repo: ${data.path}`, 'success');
+      setWizardStep(2);
+    } catch (err) {
+      if (wizardErrorMsg) {
+        wizardErrorMsg.textContent = err.message;
+        wizardErrorMsg.hidden = false;
+      }
+    }
+  });
+
+  // Folder Browser Modal Logic
+  async function browseDirectory(dirPath) {
+    if (!browserDirList) return;
+    browserDirList.innerHTML = '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">Loading directories…</div>';
+    try {
+      const res = await fetch(`/api/v1/fs/browse?dir=${encodeURIComponent(dirPath || '')}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to read directory');
+
+      browserCurrentDir = data.current;
+      if (browserCurrentPath) browserCurrentPath.textContent = data.current;
+      if (browserGitIndicator) browserGitIndicator.hidden = !data.is_git_repo;
+
+      if (!data.directories || data.directories.length === 0) {
+        browserDirList.innerHTML = '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">(No subdirectories)</div>';
+        return;
+      }
+
+      browserDirList.innerHTML = '';
+      data.directories.forEach(d => {
+        const item = document.createElement('div');
+        item.className = 'browser-dir-item';
+        item.innerHTML = `
+          <div class="browser-dir-name">
+            <span>📁</span>
+            <strong>${escapeHtml(d.name)}</strong>
+          </div>
+          ${d.is_git_repo ? '<span style="font-size: 10px; color: #10b981; font-weight: 700;">git</span>' : ''}
+        `;
+        item.addEventListener('click', () => browseDirectory(d.path));
+        browserDirList.appendChild(item);
+      });
+    } catch (err) {
+      browserDirList.innerHTML = `<div style="padding: 12px; color: #ef4444; font-size: 12px;">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  btnBrowseFolder?.addEventListener('click', () => {
+    const curPath = document.getElementById('wizard-project-path')?.value?.trim();
+    if (folderBrowserModal) folderBrowserModal.hidden = false;
+    browseDirectory(curPath || '');
+  });
+
+  function closeFolderBrowser() {
+    if (folderBrowserModal) folderBrowserModal.hidden = true;
+  }
+
+  btnCloseFolderBrowser?.addEventListener('click', closeFolderBrowser);
+  btnCancelFolderBrowser?.addEventListener('click', closeFolderBrowser);
+
+  btnBrowserParent?.addEventListener('click', () => {
+    if (!browserCurrentDir) return;
+    const parts = browserCurrentDir.split('/').filter(Boolean);
+    parts.pop();
+    const parent = '/' + parts.join('/');
+    browseDirectory(parent);
+  });
+
+  btnBrowserCreateFolder?.addEventListener('click', async () => {
+    const name = browserNewFolderName?.value?.trim();
+    if (!name || !browserCurrentDir) return;
+    const newPath = browserCurrentDir.endsWith('/') ? `${browserCurrentDir}${name}` : `${browserCurrentDir}/${name}`;
+    try {
+      const res = await fetch('/api/v1/fs/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: newPath, init_git: true })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to create folder');
+      }
+      if (browserNewFolderName) browserNewFolderName.value = '';
+      await browseDirectory(newPath);
+    } catch (e) {
+      alert(e.message);
+    }
+  });
+
+  btnSelectCurrentFolder?.addEventListener('click', () => {
+    if (browserCurrentDir) {
+      const pathInput = document.getElementById('wizard-project-path');
+      const nameInput = document.getElementById('wizard-project-name');
+      if (pathInput) {
+        pathInput.value = browserCurrentDir;
+        pathMissingBanner.hidden = true;
+      }
+      if (nameInput && !nameInput.value.trim()) {
+        const parts = browserCurrentDir.split('/').filter(Boolean);
+        if (parts.length > 0) nameInput.value = parts[parts.length - 1];
+      }
+    }
+    closeFolderBrowser();
+  });
+
   if (btnOpenProjectWizard && projectWizardModal) {
     btnOpenProjectWizard.addEventListener('click', () => {
+      setWizardStep(1);
       projectWizardModal.hidden = false;
       if (wizardErrorMsg) wizardErrorMsg.hidden = true;
+      if (pathMissingBanner) pathMissingBanner.hidden = true;
       document.getElementById('wizard-project-name')?.focus();
     });
   }
@@ -3606,6 +3877,8 @@ document.addEventListener('DOMContentLoaded', () => {
       wizardErrorMsg.hidden = true;
       wizardErrorMsg.textContent = '';
     }
+    if (pathMissingBanner) pathMissingBanner.hidden = true;
+    setWizardStep(1);
   }
 
   if (btnCloseProjectWizard) btnCloseProjectWizard.addEventListener('click', closeProjectWizard);
@@ -3625,22 +3898,40 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!name || !path) return;
       if (wizardErrorMsg) wizardErrorMsg.hidden = true;
 
-      const submitBtn = projectWizardForm.querySelector('button[type="submit"]');
       isSubmittingWizard = true;
-      if (submitBtn) submitBtn.disabled = true;
+      if (btnSubmitWizard) btnSubmitWizard.disabled = true;
 
       try {
         const res = await fetch('/api/v1/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, path, mode, zone })
+          body: JSON.stringify({
+            name,
+            path,
+            mode,
+            zone,
+            team_preset: selectedTeamPreset,
+            create_if_missing: true
+          })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Project creation failed');
-        log(`Project registered: ${data.project.name} (${data.project.mode})`, 'success');
+        log(`Project registered with ${selectedTeamPreset} team: ${data.project.name} (${data.project.mode})`, 'success');
+
+        // Automatically activate newly created project
+        try {
+          await fetch(`/api/v1/projects/${encodeURIComponent(data.project.id)}/activate`, { method: 'POST' });
+          currentProjectId = data.project.id;
+        } catch (_) {}
+
         projectWizardForm.reset();
         closeProjectWizard();
+        switchView('view-team-room');
         await loadProjects();
+        await loadWorkspace();
+        await loadAgents();
+        await loadTasks();
+        await loadRealRepositoryData();
       } catch (err) {
         if (wizardErrorMsg) {
           wizardErrorMsg.textContent = err.message;
@@ -3648,7 +3939,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       } finally {
         isSubmittingWizard = false;
-        if (submitBtn) submitBtn.disabled = false;
+        if (btnSubmitWizard) btnSubmitWizard.disabled = false;
       }
     });
   }
@@ -4085,5 +4376,6 @@ document.addEventListener('DOMContentLoaded', () => {
   loadTasks();
   loadPopups();
   loadRealRepositoryData();
+  switchView('view-team-room');
   connectSSE();
 });

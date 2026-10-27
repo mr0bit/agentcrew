@@ -277,7 +277,7 @@
     <main class="dashboard-container">
       
       <!-- VIEW 0: Overview (Analytics Dashboard Style) -->
-      <section id="view-overview" class="fullscreen-view active">
+      <section id="view-overview" class="fullscreen-view">
         <div class="view-header">
           <div class="header-titles">
             <h2>Engineering Overview</h2>
@@ -386,7 +386,7 @@
       </section>
 
       <!-- VIEW 1: Agent Room Cockpit (AgentsRoom Layout) -->
-      <section id="view-team-room" class="fullscreen-view">
+      <section id="view-team-room" class="fullscreen-view active">
         <div class="view-header cockpit-subtle-header">
           <div class="header-titles">
             <h2>Agent Room</h2>
@@ -1168,65 +1168,207 @@
     </div>
   </footer>
 
-  <!-- Project Onboarding Wizard Modal (TASK-39) -->
+  <!-- Project Onboarding Wizard Modal with 3-Step Guided Journey -->
   <div class="modal-overlay" id="project-wizard-modal" hidden role="dialog" aria-modal="true" aria-labelledby="wizard-modal-title">
     <div class="modal-card project-wizard-card">
       <div class="modal-header">
         <div>
-          <h2 id="wizard-modal-title" class="modal-title">Create / Connect Project</h2>
-          <p class="modal-subtitle">Organize codebases and choose multi-agent orchestration strategy</p>
+          <h2 id="wizard-modal-title" class="modal-title">Project Onboarding Journey</h2>
+          <p class="modal-subtitle" id="wizard-modal-subtitle">Step 1 of 3: Repository & Configuration</p>
         </div>
         <button class="modal-close-btn" id="btn-close-project-wizard" type="button" aria-label="Close modal">×</button>
       </div>
+
+      <!-- Step Indicator -->
+      <div class="wizard-steps-header">
+        <div class="wizard-step-node active" id="step-node-1" data-step="1">
+          <span class="wizard-step-badge">1</span>
+          <span>Project</span>
+        </div>
+        <div class="wizard-step-divider"></div>
+        <div class="wizard-step-node" id="step-node-2" data-step="2">
+          <span class="wizard-step-badge">2</span>
+          <span>Team Roster</span>
+        </div>
+        <div class="wizard-step-divider"></div>
+        <div class="wizard-step-node" id="step-node-3" data-step="3">
+          <span class="wizard-step-badge">3</span>
+          <span>Launch</span>
+        </div>
+      </div>
+
       <form id="project-wizard-form" class="wizard-form">
-        <div class="form-group">
-          <label for="wizard-project-name">Project Name</label>
-          <input type="text" id="wizard-project-name" class="form-input" placeholder="e.g. Acme API, Personal Blog" required>
-        </div>
-        <div class="form-group">
-          <label for="wizard-project-path">Local Repository Path</label>
-          <input type="text" id="wizard-project-path" class="form-input" placeholder="/home/username/projects/my-repo" required>
-          <small class="form-help">Must be an existing directory on your machine.</small>
-        </div>
-        <div class="form-group">
-          <label for="wizard-project-zone">Workspace Zone</label>
-          <select id="wizard-project-zone" class="form-select">
-            <option value="work">Work</option>
-            <option value="personal">Personal</option>
-            <option value="side">Side Projects</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Project Operating Mode</label>
-          <div class="wizard-mode-cards">
-            <label class="mode-card">
-              <input type="radio" name="wizard-mode" value="independent" checked>
-              <div class="mode-card-content">
-                <div class="mode-card-header">
-                  <strong>Independent Repo</strong>
-                  <span class="badge-mode">Direct</span>
+        <!-- STEP 1: Project Details & Folder -->
+        <div class="wizard-step-panel" id="wizard-step-panel-1">
+          <div class="form-group">
+            <label for="wizard-project-name">Project Name</label>
+            <input type="text" id="wizard-project-name" class="form-input" placeholder="e.g. Mobile App, Backend Service, Website" required>
+          </div>
+          <div class="form-group">
+            <label for="wizard-project-path">Local Repository Path</label>
+            <div class="path-input-group">
+              <input type="text" id="wizard-project-path" class="form-input" placeholder="/home/username/projects/my-repo" required>
+              <button type="button" class="btn-browse" id="btn-browse-folder" title="Browse folders on disk">Browse…</button>
+            </div>
+            <div id="path-missing-banner" class="path-missing-banner" hidden>
+              <span>Folder does not exist on disk yet.</span>
+              <button type="button" id="btn-create-missing-folder">Create Folder & Init Git</button>
+            </div>
+            <small class="form-help">Enter an absolute path or click Browse to select an existing folder / create a new one.</small>
+          </div>
+          <div class="form-group">
+            <label for="wizard-project-zone">Workspace Zone</label>
+            <select id="wizard-project-zone" class="form-select">
+              <option value="work">Work (Enterprise / Client codebases)</option>
+              <option value="personal">Personal (Side projects & learning)</option>
+              <option value="side">Open Source / Experiments</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Operating Mode</label>
+            <div class="wizard-mode-cards">
+              <label class="mode-card">
+                <input type="radio" name="wizard-mode" value="independent" checked>
+                <div class="mode-card-content">
+                  <div class="mode-card-header">
+                    <strong>Independent Repo</strong>
+                    <span class="badge-mode">Direct</span>
+                  </div>
+                  <p>Agents work directly in the repo trunk or standard feature branches. Ideal for small-to-medium teams.</p>
                 </div>
-                <p>Agents work directly inside the repository trunk or standard feature branches. Ideal for single-focus builds.</p>
-              </div>
-            </label>
-            <label class="mode-card">
-              <input type="radio" name="wizard-mode" value="multi_worktree">
-              <div class="mode-card-content">
-                <div class="mode-card-header">
-                  <strong>Multi-Worktree Crew</strong>
-                  <span class="badge-mode">Isolated</span>
+              </label>
+              <label class="mode-card">
+                <input type="radio" name="wizard-mode" value="multi_worktree">
+                <div class="mode-card-content">
+                  <div class="mode-card-header">
+                    <strong>Multi-Worktree Crew</strong>
+                    <span class="badge-mode">Isolated</span>
+                  </div>
+                  <p>Isolates each agent and task into dedicated Git worktrees under <code>.agentcrew/worktrees/</code> to prevent merge clashes.</p>
                 </div>
-                <p>Isolates each agent and task into dedicated Git worktrees under <code>.agentcrew/worktrees/</code> to prevent merge clashes.</p>
-              </div>
-            </label>
+              </label>
+            </div>
           </div>
         </div>
+
+        <!-- STEP 2: Team Composition Journey -->
+        <div class="wizard-step-panel" id="wizard-step-panel-2" hidden>
+          <div class="form-group">
+            <label>Choose Team Size & Composition</label>
+            <div class="team-preset-cards" id="team-preset-cards">
+              <!-- Preset 1: Lean Squad -->
+              <div class="team-preset-card selected" data-preset="lean">
+                <div class="preset-header">
+                  <span class="preset-title">🚀 Lean Dev & Test Squad</span>
+                  <span class="preset-count-badge">3 Agents</span>
+                </div>
+                <p class="preset-desc">Recommended for small teams, prototypes, or focused feature builds. Low token overhead and zero coordination friction.</p>
+                <div class="preset-roster-preview">
+                  <span class="preset-member-pill"><strong>Dev-1</strong> <span class="preset-member-role">(Developer)</span></span>
+                  <span class="preset-member-pill"><strong>QA-1</strong> <span class="preset-member-role">(Tester)</span></span>
+                  <span class="preset-member-pill"><strong>Integrator-1</strong> <span class="preset-member-role">(Integrator)</span></span>
+                </div>
+              </div>
+
+              <!-- Preset 2: Agile Team -->
+              <div class="team-preset-card" data-preset="agile">
+                <div class="preset-header">
+                  <span class="preset-title">⚡ Agile Feature Team</span>
+                  <span class="preset-count-badge">6 Agents</span>
+                </div>
+                <p class="preset-desc">Adds planning and architecture guardrails: Product Owner for scope, Architect for design review, dual Developers, QA, and Integrator.</p>
+                <div class="preset-roster-preview">
+                  <span class="preset-member-pill"><strong>Peter</strong> <span class="preset-member-role">(PO)</span></span>
+                  <span class="preset-member-pill"><strong>Arthur</strong> <span class="preset-member-role">(Architect)</span></span>
+                  <span class="preset-member-pill"><strong>Dev-1</strong> <span class="preset-member-role">(Dev)</span></span>
+                  <span class="preset-member-pill"><strong>Dev-2</strong> <span class="preset-member-role">(Dev)</span></span>
+                  <span class="preset-member-pill"><strong>QA-1</strong> <span class="preset-member-role">(Tester)</span></span>
+                  <span class="preset-member-pill"><strong>Integrator-1</strong> <span class="preset-member-role">(Integrator)</span></span>
+                </div>
+              </div>
+
+              <!-- Preset 3: Full Enterprise Crew -->
+              <div class="team-preset-card" data-preset="enterprise">
+                <div class="preset-header">
+                  <span class="preset-title">🏛️ Full Enterprise Crew</span>
+                  <span class="preset-count-badge">13 Agents</span>
+                </div>
+                <p class="preset-desc">Complete autonomous crew with specialized Business Analyst, Product Owner, Architect, 4 Developers, 4 QA Testers, and 2 Integrators.</p>
+                <div class="preset-roster-preview">
+                  <span class="preset-member-pill"><strong>Alice</strong> <span class="preset-member-role">(BA)</span></span>
+                  <span class="preset-member-pill"><strong>Peter</strong> <span class="preset-member-role">(PO)</span></span>
+                  <span class="preset-member-pill"><strong>Arthur</strong> <span class="preset-member-role">(Architect)</span></span>
+                  <span class="preset-member-pill"><strong>Dev-1..4</strong> <span class="preset-member-role">(4 Devs)</span></span>
+                  <span class="preset-member-pill"><strong>QA-1..4</strong> <span class="preset-member-role">(4 Testers)</span></span>
+                  <span class="preset-member-pill"><strong>Integrator-1..2</strong> <span class="preset-member-role">(2 Integrators)</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- STEP 3: Confirm & Launch -->
+        <div class="wizard-step-panel" id="wizard-step-panel-3" hidden>
+          <div class="form-group">
+            <label>Review Configuration</label>
+            <div class="card p-3" id="wizard-summary-card" style="background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: 10px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h3 id="summary-project-name" style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 0;">Project Name</h3>
+                <span id="summary-project-zone" class="badge-mode">Work</span>
+              </div>
+              <p id="summary-project-path" style="font-size: 12px; font-family: monospace; color: var(--text-secondary); margin-bottom: 12px; word-break: break-all;">/path/to/repo</p>
+              <div style="border-top: 1px solid var(--border-subtle); padding-top: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <strong id="summary-team-name" style="font-size: 13px; color: var(--text-primary);">Lean Squad</strong>
+                  <span id="summary-team-count" class="preset-count-badge">3 Agents</span>
+                </div>
+                <div id="summary-team-roster" class="preset-roster-preview"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div id="wizard-error-msg" class="wizard-error" hidden></div>
         <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="btn-wizard-back" hidden>Back</button>
           <button type="button" class="btn btn-secondary" id="btn-cancel-project-wizard">Cancel</button>
-          <button type="submit" class="btn btn-primary" id="btn-submit-project-wizard">Create & Connect</button>
+          <button type="button" class="btn btn-primary" id="btn-wizard-next">Next: Team Roster</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-project-wizard" hidden>Launch Team Workspace</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Folder Browser Dialog Modal -->
+  <div class="modal-overlay" id="folder-browser-modal" hidden role="dialog" aria-modal="true" aria-labelledby="folder-browser-title">
+    <div class="modal-card folder-browser-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="folder-browser-title" class="modal-title">Select Directory</h2>
+          <p class="modal-subtitle">Browse local directories or create a new folder</p>
+        </div>
+        <button class="modal-close-btn" id="btn-close-folder-browser" type="button" aria-label="Close modal">×</button>
+      </div>
+      <div class="modal-body" style="padding: 16px 24px; display: flex; flex-direction: column; gap: 12px;">
+        <div class="browser-breadcrumbs" id="browser-current-path">/</div>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <button type="button" class="btn-browse" id="btn-browser-parent" style="padding: 4px 10px; font-size: 12px;">⬆ Up One Level</button>
+          <span id="browser-git-indicator" style="font-size: 11px; color: #10b981;" hidden>● Git repository</span>
+        </div>
+        <div class="browser-dir-list" id="browser-dir-list">
+          <div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">Loading directories…</div>
+        </div>
+        <div class="browser-actions-bar">
+          <div class="browser-new-folder-form">
+            <input type="text" id="browser-new-folder-name" class="form-input" placeholder="New folder name…" style="padding: 6px 10px; font-size: 12px;">
+            <button type="button" class="btn-browse" id="btn-browser-create-folder" style="padding: 6px 10px; font-size: 12px;">+ New Folder</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="padding: 12px 24px 20px 24px; border-top: 1px solid var(--border-subtle);">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-folder-browser">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btn-select-current-folder">Select This Folder</button>
+      </div>
     </div>
   </div>
 

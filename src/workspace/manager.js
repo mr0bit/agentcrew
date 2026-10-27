@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { spawnSync } = require('node:child_process');
+const { TEAM_PRESETS, getRosterForPreset } = require('./team-presets');
 
 const DEFAULT_ROSTER = [
   { name: 'Alice', role: 'Business Analyst', provider: 'agy', model: 'gemini-2.5-pro' },
@@ -69,14 +71,20 @@ class WorkspaceManager {
     }
   }
 
-  async registerProject({ path: targetPath, name, mode = 'multi_worktree', zone = 'work' } = {}) {
+  async registerProject({ path: targetPath, name, mode = 'multi_worktree', zone = 'work', roster, team_preset, create_if_missing = false } = {}) {
     if (!targetPath || typeof targetPath !== 'string') {
       throw Object.assign(new Error('Project path is required'), { statusCode: 400 });
     }
-    if (!fs.existsSync(targetPath)) {
-      throw Object.assign(new Error(`Target path does not exist: ${targetPath}`), { statusCode: 400 });
+    const resolvedPath = path.resolve(targetPath);
+    if (!fs.existsSync(resolvedPath)) {
+      if (create_if_missing) {
+        fs.mkdirSync(resolvedPath, { recursive: true });
+        spawnSync('git', ['init'], { cwd: resolvedPath, stdio: 'ignore' });
+      } else {
+        throw Object.assign(new Error(`Target path does not exist: ${targetPath}`), { statusCode: 400 });
+      }
     }
-    const normalized = fs.realpathSync(targetPath);
+    const normalized = fs.realpathSync(resolvedPath);
     if (!['independent', 'multi_worktree'].includes(mode)) {
       throw Object.assign(new Error('Invalid project mode: must be independent or multi_worktree'), { statusCode: 400 });
     }
@@ -92,7 +100,7 @@ class WorkspaceManager {
       const count = db.prepare('SELECT COUNT(*) as c FROM projects').get().c;
       const isActive = count === 0 ? 1 : 0;
       const projectName = name || path.basename(normalized);
-      const res = await this.initProject({ repoPath: normalized, name: projectName, mode, zone, isActive });
+      const res = await this.initProject({ repoPath: normalized, name: projectName, mode, zone, isActive, roster, teamPreset: team_preset });
       const row = db.prepare('SELECT * FROM projects WHERE id = ?').get(res.id);
       return { ...row, is_active: Boolean(row.is_active), dbPath: res.dbPath };
     } finally {
@@ -181,7 +189,7 @@ class WorkspaceManager {
     return this.initProject({ repoPath: normalized, name, mode, zone, isActive: 1 });
   }
 
-  async initProject({ repoPath, name, mode = 'multi_worktree', zone = 'work', isActive = 0 } = {}) {
+  async initProject({ repoPath, name, mode = 'multi_worktree', zone = 'work', isActive = 0, roster, teamPreset } = {}) {
     const projectId = crypto.randomUUID();
     const projectDir = path.join(this.baseDir, 'projects', projectId);
     fs.mkdirSync(projectDir, { recursive: true });
@@ -231,15 +239,23 @@ class WorkspaceManager {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    for (const member of DEFAULT_ROSTER) {
+    let rosterToSeed = DEFAULT_ROSTER;
+    if (Array.isArray(roster) && roster.length > 0) {
+      rosterToSeed = roster;
+    } else if (teamPreset) {
+      const presetRoster = getRosterForPreset(teamPreset);
+      if (presetRoster) rosterToSeed = presetRoster;
+    }
+
+    for (const member of rosterToSeed) {
       insertAgent.run(
         crypto.randomUUID(),
         projectId,
         member.name,
         member.role,
-        member.provider,
-        member.model,
-        `avatar-${member.role.toLowerCase().replace(/\s+/g, '-')}`,
+        member.provider || 'codex',
+        member.model || 'gpt-6-luna',
+        member.avatar || `avatar-${(member.role || 'dev').toLowerCase().replace(/\s+/g, '-')}`,
         now
       );
     }
@@ -406,4 +422,4 @@ class WorkspaceManager {
   }
 }
 
-module.exports = { WorkspaceManager, DEFAULT_ROSTER };
+module.exports = { WorkspaceManager, DEFAULT_ROSTER, TEAM_PRESETS };
