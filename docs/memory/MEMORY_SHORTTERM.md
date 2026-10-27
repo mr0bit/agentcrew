@@ -461,3 +461,22 @@ Diagnosed and resolved agent provider dispatch failure and Agent Configuration m
 - Added support for `agy` JSON stream responses (`event: result -> result.response` and `step_update.text_delta`) in both `AgyAdapter.parseStreamEvent()` and `ChatService`.
 - Fixed Agent Configuration UI/backend sync: `app.js` sets `row.dataset.agentId` and exposes `window.agentCrewSelectedAgent()`; `cockpit-actions.js` uses select dropdowns for primary and backup providers, pre-populating current role/model/provider; `agent.configure` persists atomic primary & backup provider settings; removed false-positive 409 rejection when idle monitoring terminals are connected.
 - Verified end-to-end live conversational turns for Peter via both `agy` and `codex`. 152/152 tests passing green. Server restarted on port 3000.
+
+## 2026-10-25
+
+Started local server daemon (`node bin/wizard.js server 3000`) in background task.
+Tested live HTTP and data routes: `/`, `/terminal`, `/api/v1/workspace`, `/api/v1/agents`,
+`/api/v1/readiness`, `/api/v1/projects`, `/api/v1/tasks`, `/api/v1/pull-requests`,
+`/api/v1/repositories`, `/api/v1/analytics`, `/api/v1/git/status`, and
+`/api/v1/room/messages?channel=team-activity`. All endpoints responded with HTTP 200
+and valid live workspace payloads. All 152 tests green.
+
+## 2026-10-27
+
+Session opened with `docs/memory/MEMORY.md` and `docs/memory/MEMORY_SHORTTERM.md` loaded.
+Verified 152/152 tests passing green on Node v24.22.0. Current branch
+`feat/task-37-multi-project-registry` is ahead of remote by 8 commits. Evaluated Milestone
+m-3 (AgentsRoom Cockpit & Specialist Store) queue: TASK-40 through TASK-55 pending in backlog.
+Ready for specialist catalog & store API implementation or PR creation.
+
+
