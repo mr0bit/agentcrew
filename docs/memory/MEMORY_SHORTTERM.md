@@ -487,7 +487,14 @@ Addressed human review remarks from testing in an iterative loop:
 2. **Directory Browser & Folder Creation (Remark 2)**: Added backend endpoints `GET /api/v1/fs/browse` and `POST /api/v1/fs/mkdir` with git init support. Added modal folder browser with parent traversal and new folder creation, plus inline missing directory detection banner with one-click folder creation.
 3. **Project Dock Icon Spacing (Remark 3)**: Fixed missing `.dock-zone-group` styles in `style.css` with uniform 8px gap between items and 16px between zones. Verified bounding boxes via headless Playwright snapshot loop.
 4. **Guided Team Composition Journey (Remark 4)**: Transformed Onboarding Wizard into a 3-step Journey (Step 1: Project & Folder -> Step 2: Team Roster Selection: Lean 3-agent Squad, Agile 6-agent Feature Team, Full Enterprise 13-agent Crew -> Step 3: Review & Launch). Created `src/workspace/team-presets.js` and wired preset seeding into project SQLite database.
-5. **Delegation Skills**: Installed `codex-delegate` and `agy-delegate` into `.agents/skills/`. Conducted architectural debate via Codex CLI (`gpt-6-luna`).
+5. **Delegation & Review Skills**: Installed `codex-delegate`, `agy-delegate`, `delegate-setup`, `debate-review`, and `debate` into `.agents/skills/`. Configured project fleet in `.delegate/config.json`:
+   - `feature`: `codex:gpt-6-luna`
+   - `tests`: `agy:gemini-3.8-flash-medium`
+   - `ui`: `agy:gemini-3.8-flash-medium`
+   - `complex`: `codex:gpt-6.1-sol` (effort: medium)
+   - `review-main`: `agy:gemini-4-argon-medium` (readOnly)
+   - `review-debate`: `codex:gpt-6.1-sol` (effort: medium, readOnly)
+   Verified via `node .agents/skills/debate-review/scripts/review-pr.mjs --check`: both `review-main` (19s) and `review-debate` (90s) healthy and passed.
 155/155 tests passing green. Server daemon restarted and verified with live Playwright snapshots.
 
 
