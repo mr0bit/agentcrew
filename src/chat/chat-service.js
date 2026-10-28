@@ -111,13 +111,16 @@ class ChatService {
     return reports;
   }
 
-  async getAgentSession(agentId, provider = null) {
-    const cacheKey = `${agentId}:${provider || '*'}`;
+  async getAgentSession(agentId, provider = null, options = {}) {
+    const projectId = options.projectId || this.projectId;
+    const repoPath = options.repoPath || this.repoPath;
+    const scopeKey = `${projectId || 'unregistered'}@${repoPath}`;
+    const cacheKey = `${scopeKey}:${agentId}:${provider || '*'}`;
     if (this.sessionCache.has(cacheKey)) {
       return this.sessionCache.get(cacheKey);
     }
-    if (this.workspace && this.projectId && typeof this.workspace.getAgentSession === 'function') {
-      const session = await this.workspace.getAgentSession(this.projectId, agentId, provider);
+    if (this.workspace && projectId && typeof this.workspace.getAgentSession === 'function') {
+      const session = await this.workspace.getAgentSession(projectId, agentId, provider);
       if (session) {
         this.sessionCache.set(cacheKey, session);
         return session;
@@ -126,12 +129,15 @@ class ChatService {
     return null;
   }
 
-  async saveAgentSession(agentId, sessionData) {
-    if (this.workspace && this.projectId && typeof this.workspace.saveAgentSession === 'function') {
-      await this.workspace.saveAgentSession(this.projectId, agentId, sessionData);
+  async saveAgentSession(agentId, sessionData, options = {}) {
+    const projectId = options.projectId || this.projectId;
+    const repoPath = options.repoPath || this.repoPath;
+    if (this.workspace && projectId && typeof this.workspace.saveAgentSession === 'function') {
+      await this.workspace.saveAgentSession(projectId, agentId, sessionData);
     }
-    this.sessionCache.set(`${agentId}:${sessionData.provider}`, sessionData);
-    this.sessionCache.set(`${agentId}:*`, sessionData);
+    const scopeKey = `${projectId || 'unregistered'}@${repoPath}`;
+    this.sessionCache.set(`${scopeKey}:${agentId}:${sessionData.provider}`, sessionData);
+    this.sessionCache.set(`${scopeKey}:${agentId}:*`, sessionData);
   }
 
   buildRolePrompt({ agentName, role, gitContext, reviewContext, userPrompt } = {}) {
@@ -157,10 +163,11 @@ class ChatService {
     ].filter(Boolean).join('\n');
   }
 
-  async resolveAgent(agentId) {
-    if (this.workspace && this.projectId) {
+  async resolveAgent(agentId, options = {}) {
+    const projectId = options.projectId || this.projectId;
+    if (this.workspace && projectId) {
       try {
-        const agents = await this.workspace.listAgents(this.projectId);
+        const agents = await this.workspace.listAgents(projectId);
         const match = agents.find(
           (a) => a.name.toLowerCase() === agentId.toLowerCase() || a.id === agentId
         );
@@ -199,13 +206,16 @@ class ChatService {
   }
 
   async generateResponse(agentId, prompt, options = {}) {
-    const agent = await this.resolveAgent(agentId);
+    const projectId = options.projectId ?? this.projectId;
+    const repoPath = options.repoPath || this.repoPath;
+    const agent = await this.resolveAgent(agentId, { projectId, repoPath });
+    const schedulerAgentKey = projectId ? `${projectId}:${agent.name}` : agent.name;
     const label = `[${agent.name} (${agent.role})]`;
 
     // Concurrency ceiling: chat turns are enqueued on the TurnScheduler (maxConcurrency: 4)
     const turnId = `chat-${agent.name}-${Date.now()}`;
     const turnControl = new AbortController();
-    const activeKey = agent.name;
+    const activeKey = `${projectId || 'unregistered'}@${repoPath}:${agent.name}`;
     const turnPromise = this.scheduler.enqueue(turnId, async () => {
       this.activeTurns.set(activeKey, { controller: turnControl, done: null });
       const active = this.activeTurns.get(activeKey);
@@ -214,7 +224,7 @@ class ChatService {
       try {
       let gitInfo = '';
       try {
-        const gitCheck = await this.ptyManager.execute('git log -n 1 --oneline', { cwd: this.repoPath });
+        const gitCheck = await this.ptyManager.execute('git log -n 1 --oneline', { cwd: repoPath });
         gitInfo = gitCheck.stdout ? `(Head: ${gitCheck.stdout})` : '';
       } catch (_) {}
 
@@ -258,7 +268,7 @@ class ChatService {
       for (const name of order) {
         if (turnControl.signal.aborted) return `${label}: turn interrupted for takeover`;
         const adapter = this.adapters[name];
-        const existingSession = await this.getAgentSession(agent.name, name);
+        const existingSession = await this.getAgentSession(agent.name, name, { projectId, repoPath });
         try {
           let streamBuffer = '';
           let streamedText = '';
@@ -272,6 +282,8 @@ class ChatService {
             }
             const normalized = adapter.parseStreamEvent(line) || event;
             let text = normalized.type === 'message.assistant' ? normalized.text : null;
+            if (!text && typeof event.step_update?.text_delta === 'string') text = event.step_update.text_delta;
+            if (!text && typeof event.result?.response === 'string') text = event.result.response;
             if (!text && typeof event.delta === 'string') text = event.delta;
             if (!text && typeof event.text_delta === 'string') text = event.text_delta;
             if (text) {
@@ -297,8 +309,14 @@ class ChatService {
           // Model selection: only apply model if calling assigned provider, and avoid obsolete/unsupported placeholders
           let modelArg = null;
           const configuredModel = name === agent.provider ? agent.model : agent.backupModel;
-          if (configuredModel && (name !== agent.provider || (configuredModel !== 'gemini-2.5-pro' && configuredModel !== 'o3'))) {
-            modelArg = configuredModel;
+          if (configuredModel) {
+            if (name === 'codex' && (configuredModel === 'gemini-2.5-pro' || configuredModel === 'flash-3.8' || configuredModel === 'gpt-4o')) {
+              modelArg = null;
+            } else if (name === 'agy' && (configuredModel === 'o3' || configuredModel === 'gpt-4o' || configuredModel === 'gpt-4.1')) {
+              modelArg = null;
+            } else if (name !== agent.provider || (configuredModel !== 'gemini-2.5-pro' && configuredModel !== 'o3')) {
+              modelArg = configuredModel;
+            }
           }
 
           const resumeFrom = (existingSession && existingSession.provider === name)
@@ -306,7 +324,7 @@ class ChatService {
             : (options.resumeFrom || undefined);
 
           const spawnArgs = adapter.buildSpawnArgs({
-            cwd: this.repoPath,
+            cwd: repoPath,
             model: modelArg,
             resumeFrom,
           });
@@ -328,7 +346,7 @@ class ChatService {
 
             if (this.ptyManager.executeCommand) {
               result = await this.ptyManager.executeCommand(adapter.command || 'agy', finalArgs, {
-                cwd: this.repoPath,
+                cwd: repoPath,
                 timeoutMs: 45000,
                 signal: turnControl.signal,
                 onStdout,
@@ -338,7 +356,7 @@ class ChatService {
             } else {
               result = await this.ptyManager.execute(
                 `${adapter.command || 'agy'} ${finalArgs.map((a) => JSON.stringify(a)).join(' ')}`,
-                { cwd: this.repoPath, timeoutMs: 45000 }
+                { cwd: repoPath, timeoutMs: 45000 }
               );
             }
             flushStream();
@@ -351,13 +369,16 @@ class ChatService {
               } catch (_) {
                 continue;
               }
-              if (data.conversation_id) {
+              const convId = data.conversation_id || data.result?.conversation_id || data.init?.conversation_id;
+              if (convId) {
                 await this.saveAgentSession(agent.name, {
                   provider: 'agy',
-                  sessionId: data.conversation_id,
-                });
+                  sessionId: convId,
+                }, { projectId, repoPath });
               }
-              if (data.response) {
+              if (data.result?.response) {
+                text = data.result.response.trim();
+              } else if (data.response) {
                 text = data.response.trim();
               }
             }
@@ -375,7 +396,7 @@ class ChatService {
 
             if (this.ptyManager.executeCommand) {
               result = await this.ptyManager.executeCommand(adapter.command || 'codex', finalArgs, {
-                cwd: this.repoPath,
+                cwd: repoPath,
                 timeoutMs: 60000,
                 signal: turnControl.signal,
                 onStdout,
@@ -385,13 +406,14 @@ class ChatService {
             } else {
               result = await this.ptyManager.execute(
                 `${adapter.command || 'codex'} ${finalArgs.map((a) => JSON.stringify(a)).join(' ')}`,
-                { cwd: this.repoPath, timeoutMs: 60000 }
+                { cwd: repoPath, timeoutMs: 60000 }
               );
             }
             flushStream();
 
             // Parse response events and capture thread_id for session tracking
             let answerText = '';
+            const assistantMessages = [];
             let threadId = null;
             const lines = (result.stdout || '').split('\n');
             for (const line of lines) {
@@ -404,16 +426,16 @@ class ChatService {
 
               const event = adapter.parseStreamEvent(line);
               if (event && event.type === 'message.assistant' && event.text) {
-                answerText = event.text;
-                break;
+                assistantMessages.push(event.text);
               }
             }
+            answerText = assistantMessages.at(-1) || '';
 
             if (threadId) {
               await this.saveAgentSession(agent.name, {
                 provider: 'codex',
                 sessionId: threadId,
-              });
+              }, { projectId, repoPath });
             }
 
             if (!answerText) {
@@ -427,11 +449,41 @@ class ChatService {
             }
           }
 
+          const cleanStderr = (result?.stderr || '')
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => l && !l.includes('Reading additional input from stdin') && !l.includes('Reading prompt from stdin'))
+            .join(' ');
+
+          let errorFromOutput = '';
+          if (!cleanStderr && result?.stdout) {
+            for (const line of result.stdout.split(/\r?\n/)) {
+              try {
+                const parsed = JSON.parse(line.trim());
+                if (parsed.type === 'error' && parsed.message) {
+                  try {
+                    const inner = JSON.parse(parsed.message);
+                    errorFromOutput = inner?.error?.message || parsed.message;
+                  } catch {
+                    errorFromOutput = parsed.message;
+                  }
+                } else if (parsed.type === 'turn.failed' && parsed.error?.message) {
+                  try {
+                    const inner = JSON.parse(parsed.error.message);
+                    errorFromOutput = inner?.error?.message || parsed.error.message;
+                  } catch {
+                    errorFromOutput = parsed.error.message;
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+
           const why = result?.code === 0 && !streamedText
             ? 'no readable assistant response'
             : result?.timedOut
             ? 'timed out'
-            : ((result?.stderr || '').split('\n')[0] || `exit ${result?.code}`);
+            : (cleanStderr || errorFromOutput || (result?.code != null ? `exit ${result.code}` : 'execution failed'));
           errors.push(`${name}: ${why}`);
           if (streamedText) options.onRetry?.(name);
           if (isQuotaError(`${result?.stderr || ''} ${result?.stdout || ''}`)) {
@@ -463,16 +515,18 @@ class ChatService {
           this.activeTurns.delete(activeKey);
         }
       }
-    }, { agentId: agent.name, source: options.source || 'autonomous' });
+    }, { agentId: schedulerAgentKey, source: options.source || 'autonomous' });
     return turnPromise;
   }
 
-  async quiesceAgent(agentId, { timeoutMs = 10000 } = {}) {
-    const agent = await this.resolveAgent(agentId);
+  async quiesceAgent(agentId, { timeoutMs = 10000, projectId } = {}) {
+    const effectiveProjectId = projectId ?? this.projectId;
+    const agent = await this.resolveAgent(agentId, effectiveProjectId ? { projectId: effectiveProjectId } : {});
     const key = agent.name;
-    this.scheduler.holdAgent(key);
-    this.scheduler.cancelQueuedForAgent(key);
-    const active = this.activeTurns.get(key);
+    const schedulerAgentKey = effectiveProjectId ? `${effectiveProjectId}:${key}` : key;
+    this.scheduler.holdAgent(schedulerAgentKey);
+    this.scheduler.cancelQueuedForAgent(schedulerAgentKey);
+    const active = [...this.activeTurns.entries()].find(([activeKey]) => activeKey.endsWith(`:${key}`) && (effectiveProjectId === undefined || activeKey.startsWith(`${effectiveProjectId}@`)))?.[1];
     if (!active) return { quiescent: true, agentId: key };
     active.controller.abort(new Error('Takeover requested'));
     const confirmed = await Promise.race([
@@ -482,8 +536,12 @@ class ChatService {
     return { quiescent: confirmed, agentId: key, reason: confirmed ? undefined : 'Provider process did not confirm exit' };
   }
 
-  resumeAgent(agentId) {
-    this.resolveAgent(agentId).then((agent) => this.scheduler.releaseAgent(agent.name));
+  resumeAgent(agentId, { projectId } = {}) {
+    const effectiveProjectId = projectId ?? this.projectId;
+    this.resolveAgent(agentId, effectiveProjectId ? { projectId: effectiveProjectId } : {}).then((agent) => {
+      const schedulerAgentKey = effectiveProjectId ? `${effectiveProjectId}:${agent.name}` : agent.name;
+      this.scheduler.releaseAgent(schedulerAgentKey);
+    });
   }
 }
 

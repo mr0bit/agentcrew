@@ -43,7 +43,27 @@ document.addEventListener('DOMContentLoaded', () => {
   const panelChatView = document.getElementById('panel-chat-view');
   let liveAgents = [];
   let selectedAgentName = '';
+  let inFlightAgentName = '';
   let activeAgentFilter = 'all';
+  let aiOrb = null;
+  window.agentCrewOrb = null;
+  let currentProjectId = '';
+  let isPromptInFlight = false;
+  let promptAbortController = null;
+  const renderedMessageIds = new Set();
+  let feedRequestSeq = 0;
+  let cachedTasks = [];
+  let pendingIndicatorEl = null;
+
+  function escapeHtml(text) {
+    if (text == null) return '';
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
 
   function formatToolChatText(text) {
     if (!text) return '';
@@ -54,92 +74,261 @@ document.addEventListener('DOMContentLoaded', () => {
       const trimmed = line.trim();
       if (trimmed.startsWith('●') || trimmed.startsWith('Tool:') || trimmed.startsWith('Edit(') || trimmed.startsWith('Write(')) {
         if (inTool) html += '</div>';
-        html += `<div class="tool-call-card"><div class="tool-call-header"><span class="tool-dot">●</span> <strong>${trimmed.replace(/^[●\s]+/, '')}</strong></div>`;
+        const cleanHeader = escapeHtml(trimmed.replace(/^[●\s]+/, ''));
+        html += `<div class="tool-call-card"><div class="tool-call-header"><span class="tool-dot">●</span> <strong>${cleanHeader}</strong></div>`;
         inTool = true;
       } else if (inTool && trimmed.startsWith('└')) {
-        html += `<div class="tool-call-body">${trimmed}</div></div>`;
+        const cleanBody = escapeHtml(trimmed);
+        html += `<div class="tool-call-body">${cleanBody}</div></div>`;
         inTool = false;
       } else if (trimmed.startsWith('└ done') || trimmed.includes('tok/s')) {
         if (inTool) { html += '</div>'; inTool = false; }
-        html += `<div class="tool-metrics">${trimmed}</div>`;
+        const cleanMetrics = escapeHtml(trimmed);
+        html += `<div class="tool-metrics">${cleanMetrics}</div>`;
       } else {
         if (inTool) { html += '</div>'; inTool = false; }
-        if (trimmed) html += `<div class="chat-paragraph">${trimmed}</div>`;
+        if (trimmed) html += `<div class="chat-paragraph">${escapeHtml(trimmed)}</div>`;
       }
     });
     if (inTool) html += '</div>';
     return html;
   }
 
-  function appendChatMessage(sender, text, isAgent = false, avatarLetter = null) {
+  function appendRoomMessage(messageOrSender, text, isAgent = false, avatarLetter = null) {
     if (!teamRoomChatFeed) return;
-    const msg = document.createElement('div');
-    msg.className = `chat-msg ${isAgent ? 'agent' : 'human'}`;
-    const initial = (avatarLetter || (sender ? sender.charAt(0) : '?')).toUpperCase();
-    const formatted = isAgent ? formatToolChatText(text) : `<div class="chat-text">${text}</div>`;
-    msg.innerHTML = `
-      <div class="chat-avatar">${initial}</div>
+
+    let sender = '';
+    let bodyText = '';
+    let isAgentMsg = false;
+    let initial = '';
+    let msgId = '';
+    let timeStr = '';
+
+    if (typeof messageOrSender === 'object' && messageOrSender !== null) {
+      const msg = messageOrSender;
+      msgId = msg.id || '';
+      sender = msg.sender_name || (msg.sender_type === 'human' ? 'You' : (msg.sender_id || 'Agent'));
+      bodyText = msg.text || '';
+      isAgentMsg = msg.sender_type === 'agent' || isAgent;
+      initial = (sender ? sender.charAt(0) : '?').toUpperCase();
+      timeStr = msg.created_at ? new Date(msg.created_at).toLocaleTimeString() : new Date().toLocaleTimeString();
+    } else {
+      sender = String(messageOrSender || '');
+      bodyText = String(text || '');
+      isAgentMsg = !!isAgent;
+      initial = (avatarLetter || (sender ? sender.charAt(0) : '?')).toUpperCase();
+      timeStr = new Date().toLocaleTimeString();
+    }
+
+    if (msgId && renderedMessageIds.has(msgId)) {
+      return; // Deduplicate
+    }
+    if (msgId) {
+      renderedMessageIds.add(msgId);
+    }
+
+    // Remove empty state if present
+    const emptyState = document.getElementById('chat-empty-state');
+    if (emptyState) emptyState.remove();
+
+    const msgEl = document.createElement('div');
+    msgEl.className = `chat-msg ${isAgentMsg ? 'agent' : 'human'}`;
+    if (msgId) msgEl.dataset.messageId = msgId;
+
+    if (typeof messageOrSender === 'object' && messageOrSender !== null) {
+      const clientTurnId = messageOrSender.client_turn_id || messageOrSender.metadata?.turn_id || messageOrSender.metadata?.client_turn_id || messageOrSender.turn_id;
+      if (clientTurnId) msgEl.dataset.clientTurnId = clientTurnId;
+    }
+
+    const safeSender = escapeHtml(sender);
+    const safeInitial = escapeHtml(initial);
+    const safeTime = escapeHtml(timeStr);
+
+    let contentHtml = '';
+    if (isAgentMsg) {
+      contentHtml = formatToolChatText(bodyText);
+    } else {
+      contentHtml = `<div class="chat-text">${escapeHtml(bodyText)}</div>`;
+    }
+
+    msgEl.innerHTML = `
+      <div class="chat-avatar">${safeInitial}</div>
       <div class="chat-body">
         <div class="chat-meta">
-          <span class="chat-sender">${sender}</span>
-          <span class="chat-time">${new Date().toLocaleTimeString()}</span>
+          <span class="chat-sender">${safeSender}</span>
+          <span class="chat-time">${safeTime}</span>
         </div>
-        ${formatted}
+        ${contentHtml}
       </div>
     `;
-    teamRoomChatFeed.appendChild(msg);
+
+    teamRoomChatFeed.appendChild(msgEl);
+    const autoscrollPref = localStorage.getItem('agentcrew-pref-autoscroll') ?? localStorage.getItem('agentcrew_autoscroll') ?? localStorage.getItem('agentcrew-autoscroll');
+    if (autoscrollPref !== 'false') {
+      teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
+    }
+    return msgEl;
+  }
+  const appendChatMessage = appendRoomMessage;
+
+  function appendPendingIndicator(agentName) {
+    removePendingIndicator();
+    if (!teamRoomChatFeed) return;
+    const item = document.createElement('div');
+    item.className = 'chat-msg agent pending';
+    item.id = 'chat-pending-msg';
+    const initials = escapeHtml((agentName || 'AG').slice(0, 2).toUpperCase());
+    item.innerHTML = `
+      <div class="chat-avatar">${initials}</div>
+      <div class="chat-body">
+        <div class="chat-meta">
+          <span class="chat-sender">${escapeHtml(agentName || 'Agent')}</span>
+          <span class="chat-time">thinking...</span>
+        </div>
+        <div class="chat-paragraph">
+          Processing request<span class="thinking-dots"><span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span></span>
+        </div>
+        <div id="chat-streaming-delta" class="chat-streaming-delta" hidden></div>
+      </div>
+    `;
+    teamRoomChatFeed.appendChild(item);
     teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
+    pendingIndicatorEl = item;
   }
 
-  function seedInitialCockpitFeed(agent) {
+  function removePendingIndicator() {
+    if (pendingIndicatorEl && pendingIndicatorEl.parentNode) {
+      pendingIndicatorEl.remove();
+    }
+    const old = document.getElementById('chat-pending-msg');
+    if (old) old.remove();
+    pendingIndicatorEl = null;
+  }
+
+  function setPromptInFlight(inFlight, statusText = '') {
+    isPromptInFlight = inFlight;
+    if (btnSendChat) btnSendChat.hidden = inFlight;
+    const btnCancel = document.getElementById('btn-cancel-chat');
+    if (btnCancel) btnCancel.hidden = !inFlight;
+
+    const elTurnsCount = document.getElementById('topbar-turns-count');
+
+    if (inFlight) {
+      if (window.agentCrewOrb) window.agentCrewOrb.setActivity(0.85);
+      const orbStatusText = document.getElementById('orb-status-text');
+      if (orbStatusText) orbStatusText.textContent = statusText || 'WORKING · PROMPT IN FLIGHT';
+      if (elTurnsCount) {
+        const curTurns = parseInt(elTurnsCount.textContent || '0', 10);
+        if (curTurns === 0) elTurnsCount.textContent = '1';
+      }
+    } else {
+      inFlightAgentName = '';
+      if (window.agentCrewOrb) window.agentCrewOrb.setActivity(0.0);
+      const orbStatusText = document.getElementById('orb-status-text');
+      if (orbStatusText) orbStatusText.textContent = 'IDLE · STANDBY';
+      removePendingIndicator();
+      promptAbortController = null;
+      if (elTurnsCount && Array.isArray(liveAgents)) {
+        const workingCount = liveAgents.filter(a => getAgentStatus(a) === 'working').length;
+        elTurnsCount.textContent = String(workingCount);
+      }
+    }
+  }
+
+  function cancelPendingPrompt() {
+    if (promptAbortController) {
+      promptAbortController.abort();
+      promptAbortController = null;
+    }
+    inFlightAgentName = '';
+    setPromptInFlight(false);
+  }
+
+  function renderChatEmptyState(agent) {
     if (!teamRoomChatFeed) return;
-    const name = agent?.name || 'Full-Stack Developer';
-    const initials = name.slice(0, 2).toUpperCase();
+    teamRoomChatFeed.replaceChildren();
+    renderedMessageIds.clear();
+    if (!agent) {
+      const emptyBox = document.createElement('div');
+      emptyBox.className = 'chat-empty-state';
+      emptyBox.id = 'chat-empty-state';
+      emptyBox.innerHTML = `
+        <div class="chat-empty-icon">💬</div>
+        <h3 class="chat-empty-name">Team Room Feed</h3>
+        <p class="chat-empty-hint">Select an agent from the roster to start collaborating or review activity.</p>
+      `;
+      teamRoomChatFeed.appendChild(emptyBox);
+      return;
+    }
+    const name = escapeHtml(agent.name || 'Agent');
+    const role = escapeHtml(agent.role || 'Team Member');
+    const provider = escapeHtml(agent.provider || 'configured');
+    const model = escapeHtml(agent.model ? ` (${agent.model})` : '');
     const color = getAgentColor ? getAgentColor(agent) : '#0284c7';
-    teamRoomChatFeed.innerHTML = `
-      <div class="chat-msg agent">
-        <div class="chat-avatar" style="background:${color};color:#fff;">${initials}</div>
-        <div class="chat-body">
-          <div class="chat-meta">
-            <span class="chat-sender">${name}</span>
-            <span class="chat-time">Just now</span>
-          </div>
-          <div class="chat-paragraph">
-            Found it. The list renders each user as a plain row. I'll extract a small component, wire it in, and keep the existing data flow untouched so the change stays isolated and easy to review.
-          </div>
-          <div class="tool-call-card">
-            <div class="tool-call-header">
-              <span class="tool-dot">●</span>
-              <strong class="tool-name">Edit</strong><span class="tool-target">(src/components/UserList.tsx)</span>
-            </div>
-            <div class="tool-call-body">
-              └ Applied 3-line change
-            </div>
-          </div>
-          <div class="tool-call-card">
-            <div class="tool-call-header">
-              <span class="tool-dot">●</span>
-              <strong class="tool-name">Write</strong><span class="tool-target">(src/components/Avatar.tsx)</span>
-            </div>
-            <div class="tool-call-body">
-              └ Wrote 42 lines to new file
-            </div>
-          </div>
-          <div class="chat-paragraph">
-            Done. The component compiles and the render path is unchanged apart from the new avatar. You can review the diff in the Changes tab.
-          </div>
-          <div class="tool-metrics">
-            └ done · 1,284.5 tok/s · 6.4s
-          </div>
-          <div class="demo-notice-box">
-            This reply is simulated for the AgentsRoom demo.<br>
-            Download AgentsRoom to run real agents on your code:<br>
-            <a href="https://agentsroom.dev/download" target="_blank" rel="noreferrer">https://agentsroom.dev/download</a>
-          </div>
-        </div>
+    const initials = escapeHtml((agent.name || 'AG').slice(0, 2).toUpperCase());
+    const owned = isAgentHumanOwned ? isAgentHumanOwned(agent) : false;
+    const statusMeta = (typeof agentStatusMeta !== 'undefined' && getAgentStatus) ? agentStatusMeta[getAgentStatus(agent)] : { label: 'Available' };
+    const statusLabel = owned ? 'Human Owned' : (statusMeta?.label || 'Available');
+
+    const container = document.createElement('div');
+    container.className = 'chat-empty-state';
+    container.id = 'chat-empty-state';
+    container.innerHTML = `
+      <div class="chat-empty-avatar" style="background:${color};">${initials}</div>
+      <h3 class="chat-empty-name">${name}</h3>
+      <div class="chat-empty-role">${role}</div>
+      <div class="chat-empty-provider">
+        <span class="provider-pill">${provider}${model}</span>
+        <span class="status-pill">${statusLabel}</span>
       </div>
+      <div class="chat-empty-divider"></div>
+      <p class="chat-empty-hint">No messages yet with <strong>${name}</strong>. Send a prompt below to assign work, discuss changes, or orchestrate tasks.</p>
     `;
-    teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
+    teamRoomChatFeed.appendChild(container);
+  }
+
+  async function loadAgentRoomFeed(agent) {
+    if (!teamRoomChatFeed) return;
+    const seq = ++feedRequestSeq;
+    const agentName = agent?.name || selectedAgentName;
+    teamRoomChatFeed.replaceChildren();
+    renderedMessageIds.clear();
+
+    try {
+      const qs = new URLSearchParams();
+      qs.set('channel', 'team-activity');
+      if (currentProjectId) qs.set('project_id', currentProjectId);
+      const res = await fetch(`/api/v1/room/messages?${qs.toString()}`);
+      if (seq !== feedRequestSeq) return;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (seq !== feedRequestSeq) return;
+      const messages = Array.isArray(data.messages) ? data.messages : [];
+
+      const relevant = messages.filter(m => {
+        if (!agentName) return true;
+        const lowerName = agentName.toLowerCase();
+        const sender = (m.sender_name || '').toLowerCase();
+        const senderId = (m.sender_id || '').toLowerCase();
+        const text = (m.text || '').toLowerCase();
+        const target = (m.metadata?.target_agent || '').toLowerCase();
+        return sender === lowerName || senderId === lowerName || text.includes('@' + lowerName) || target === lowerName;
+      });
+
+      if (relevant.length === 0) {
+        if (!teamRoomChatFeed.querySelector('.chat-msg:not(.pending)')) {
+          renderChatEmptyState(agent);
+        }
+      } else {
+        relevant.forEach(msg => appendRoomMessage(msg));
+      }
+    } catch (err) {
+      if (seq !== feedRequestSeq) return;
+      console.warn('Could not load room messages:', err);
+      if (!teamRoomChatFeed.querySelector('.chat-msg:not(.pending)')) {
+        renderChatEmptyState(agent);
+      }
+    }
   }
 
   function log(text, type = 'system') {
@@ -269,7 +458,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function animateElement(element, keyframes, options) {
     if (!element || typeof element.animate !== 'function') return null;
-    return element.animate(keyframes, { easing: motionEase, fill: 'both', ...options });
+    return element.animate(keyframes, { easing: motionEase, fill: 'none', ...options });
   }
 
   function setMobileDrawer(open) {
@@ -282,6 +471,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function switchView(targetViewId) {
+    if (targetViewId === 'view-code-review') targetViewId = 'view-reviews';
     const currentView = document.querySelector('.fullscreen-view.active');
     if (!document.getElementById(targetViewId) || currentView?.id === targetViewId) {
       setMobileDrawer(false);
@@ -300,6 +490,9 @@ document.addEventListener('DOMContentLoaded', () => {
       else t.removeAttribute('aria-current');
     });
     document.body.classList.toggle('in-team-room', targetViewId === 'view-team-room');
+    document.querySelectorAll('.topbar-view-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.view === targetViewId);
+    });
     if (mobileViewTitle) mobileViewTitle.textContent = viewLabels[targetViewId] || 'AgentCrew';
     if (mobileMoreBtn) {
       const secondaryViews = ['view-repositories', 'view-observability', 'view-settings'];
@@ -319,11 +512,22 @@ document.addEventListener('DOMContentLoaded', () => {
             { opacity: 0, transform: `translateX(${direction * 12}px)`, clipPath: 'inset(0 0 7% 0 round 12px)' },
             { opacity: 1, transform: 'translateX(0)', clipPath: 'inset(0 0 0 0 round 12px)' }
           ],
-      { duration: reducedMotion.matches ? 90 : 180 }
+      { duration: reducedMotion.matches ? 90 : 180, fill: 'none' }
     );
+    if (viewAnimation) {
+      viewAnimation.onfinish = () => {
+        try { viewAnimation.cancel(); } catch (_) {}
+      };
+    }
   }
 
   navTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      switchView(tab.dataset.view);
+    });
+  });
+
+  document.querySelectorAll('.topbar-view-tab').forEach(tab => {
     tab.addEventListener('click', () => {
       switchView(tab.dataset.view);
     });
@@ -529,9 +733,9 @@ document.addEventListener('DOMContentLoaded', () => {
         pill.className = 'legend-item';
         const linesInfo = act.lines[key] ? ` (+${act.lines[key].added} / -${act.lines[key].removed})` : '';
         pill.innerHTML = `
-          <span class="legend-dot" style="background:${person.color};"></span>
-          <strong>${person.name || key}</strong>
-          <span style="font-size:0.7rem; color:var(--text-muted);">${linesInfo}</span>
+          <span class="legend-dot" style="background:${escapeHtml(person.color || '#0284c7')};"></span>
+          <strong>${escapeHtml(person.name || key)}</strong>
+          <span style="font-size:0.7rem; color:var(--text-muted);">${escapeHtml(linesInfo)}</span>
         `;
         legendContainer.appendChild(pill);
       }
@@ -547,12 +751,12 @@ document.addEventListener('DOMContentLoaded', () => {
     analyticsData.people.forEach(p => {
       const item = document.createElement('div');
       item.className = 'contributor-item';
-      item.style.setProperty('--avatar-color', p.color);
+      item.style.setProperty('--avatar-color', p.color || '#0284c7');
       item.innerHTML = `
-        <img class="contributor-avatar" src="${p.avatar}" alt="${p.name}">
+        <img class="contributor-avatar" src="${escapeHtml(p.avatar)}" alt="${escapeHtml(p.name)}">
         <div class="contributor-info">
-          <span class="contributor-name">${p.name}</span>
-          <span class="contributor-role">${p.role}</span>
+          <span class="contributor-name">${escapeHtml(p.name)}</span>
+          <span class="contributor-role">${escapeHtml(p.role)}</span>
         </div>
       `;
       grid.appendChild(item);
@@ -579,7 +783,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const prs = analyticsData.pullRequests.filter(pr => {
       if (filter === 'all') return true;
-      return pr.status.kind === filter;
+      const kind = pr.status?.kind || pr.status || pr.state || 'open';
+      return kind === filter;
     });
 
     prs.forEach(pr => {
@@ -593,24 +798,26 @@ document.addEventListener('DOMContentLoaded', () => {
       card.dataset.number = pr.number;
       card.setAttribute('aria-label', `Open pull request ${pr.number}: ${pr.title}`);
 
-      const statusBadgeClass = pr.status.kind === 'merged' ? 'badge-success' : (pr.status.kind === 'review' ? 'badge-warning' : '');
+      const statusKind = pr.status?.kind || pr.status || pr.state || 'open';
+      const statusLabel = pr.status?.label || pr.status || pr.state || 'open';
+      const statusBadgeClass = statusKind === 'merged' ? 'badge-success' : (statusKind === 'review' ? 'badge-warning' : '');
 
       card.innerHTML = `
         <div class="pr-card-header">
-          <span class="badge ${statusBadgeClass}">${pr.status.label}</span>
-          <span style="font-size:0.75rem; color:var(--text-muted);">${pr.age} ago</span>
+          <span class="badge ${escapeHtml(statusBadgeClass)}">${escapeHtml(statusLabel)}</span>
+          <span style="font-size:0.75rem; color:var(--text-muted);">${escapeHtml(pr.age || '')} ago</span>
         </div>
-        <div class="pr-title-text">${pr.title}</div>
+        <div class="pr-title-text">${escapeHtml(pr.title || '')}</div>
         <div class="pr-meta-row">
           <div class="pr-author-chip">
-            <img class="author-avatar-sm" src="${author.avatar}" alt="${author.name}">
-            <span>@${pr.author}</span>
+            <img class="author-avatar-sm" src="${escapeHtml(author.avatar)}" alt="${escapeHtml(author.name)}">
+            <span>@${escapeHtml(pr.author)}</span>
           </div>
           <span>·</span>
-          <span>${pr.repository}</span>
+          <span>${escapeHtml(pr.repository || '')}</span>
           <div class="pr-diff-tags">
-            <span class="diff-add">+${pr.additions}</span>
-            <span class="diff-del">-${pr.deletions}</span>
+            <span class="diff-add">+${Number(pr.additions) || 0}</span>
+            <span class="diff-del">-${Number(pr.deletions) || 0}</span>
           </div>
         </div>
       `;
@@ -624,6 +831,11 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function selectPR(pr) {
+    if (typeof pr === 'number' || typeof pr === 'string') {
+      const found = (Array.isArray(analyticsData.pullRequests) ? analyticsData.pullRequests : []).find(p => Number(p.number) === Number(pr));
+      if (found) pr = found;
+    }
+    if (!pr || typeof pr !== 'object') return;
     prPanelReturnFocus = document.activeElement;
     selectedPR = pr;
     document.querySelectorAll('.pr-card-item').forEach(el => {
@@ -635,23 +847,38 @@ document.addEventListener('DOMContentLoaded', () => {
       avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${pr.author}`
     };
 
-    document.getElementById('pr-panel-title').textContent = pr.title;
-    document.getElementById('pr-panel-status').textContent = pr.status.label;
-    document.getElementById('pr-panel-opened').textContent = `Opened ${pr.opened}`;
+    const statusLabel = typeof pr.status === 'object' ? (pr.status?.label || pr.status?.name || 'open') : (pr.status || pr.state || 'open');
+    document.getElementById('pr-panel-title').textContent = pr.title || '';
+    document.getElementById('pr-panel-status').textContent = statusLabel;
+    document.getElementById('pr-panel-opened').textContent = pr.opened ? `Opened ${pr.opened}` : '';
     document.getElementById('pr-panel-author-avatar').src = author.avatar;
-    document.getElementById('pr-panel-author-handle').textContent = `@${pr.author} (${author.name})`;
-    document.getElementById('pr-panel-repo').textContent = pr.repository;
-    document.getElementById('pr-panel-additions').textContent = `+${pr.additions}`;
-    document.getElementById('pr-panel-deletions').textContent = `-${pr.deletions}`;
-    document.getElementById('pr-panel-comments').textContent = `${pr.comments} comments`;
+    document.getElementById('pr-panel-author-handle').textContent = `@${pr.author || 'unknown'} (${author.name})`;
+    document.getElementById('pr-panel-repo').textContent = pr.repository || '';
+    document.getElementById('pr-panel-additions').textContent = `+${pr.additions || 0}`;
+    document.getElementById('pr-panel-deletions').textContent = `-${pr.deletions || 0}`;
+    document.getElementById('pr-panel-comments').textContent = `${pr.comments ?? 0} comments`;
 
     const probEl = document.getElementById('pr-panel-problem');
     const problems = Array.isArray(pr.problem) ? pr.problem : [pr.problem || 'No description provided.'];
-    if (probEl) probEl.innerHTML = problems.map(p => `<p>${p}</p>`).join('');
+    if (probEl) {
+      probEl.replaceChildren();
+      problems.forEach(p => {
+        const pEl = document.createElement('p');
+        pEl.textContent = p;
+        probEl.appendChild(pEl);
+      });
+    }
 
     const appEl = document.getElementById('pr-panel-approach');
     const approaches = Array.isArray(pr.approach) ? pr.approach : [pr.approach || 'No approach summary provided.'];
-    if (appEl) appEl.innerHTML = approaches.map(a => `<p>${a}</p>`).join('');
+    if (appEl) {
+      appEl.replaceChildren();
+      approaches.forEach(a => {
+        const aEl = document.createElement('p');
+        aEl.textContent = a;
+        appEl.appendChild(aEl);
+      });
+    }
 
     // Reset Assistant response
     const respBox = document.getElementById('assistant-response-card');
@@ -695,13 +922,6 @@ document.addEventListener('DOMContentLoaded', () => {
     prPanelBackdrop.addEventListener('click', closePRPanel);
   }
 
-  // Escape key closes panel
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && selectedPR) {
-      closePRPanel();
-    }
-  });
-
   // Filter Pills click
   document.querySelectorAll('#pr-filter-pills .pill-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -720,6 +940,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function askAssistant(question) {
     if (!selectedPR || !question.trim()) return;
+    const targetPrNumber = selectedPR.number;
 
     assistantCard.style.display = 'block';
     assistantShimmer.style.display = 'flex';
@@ -754,12 +975,16 @@ document.addEventListener('DOMContentLoaded', () => {
       assistantShimmer.style.display = 'none';
       if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
       if (!data.result?.answer) throw new Error('Provider returned no review answer');
-      assistantAnswerText.textContent = data.result.answer;
-      assistantAnswerText.style.color = '';
+      if (selectedPR?.number === targetPrNumber) {
+        assistantAnswerText.textContent = data.result.answer;
+        assistantAnswerText.style.color = '';
+      }
     } catch (err) {
       assistantShimmer.style.display = 'none';
-      assistantAnswerText.textContent = `Failed to query agent: ${err.message}`;
-      assistantAnswerText.style.color = 'var(--danger)';
+      if (selectedPR?.number === targetPrNumber) {
+        assistantAnswerText.textContent = `Failed to query agent: ${err.message}`;
+        assistantAnswerText.style.color = 'var(--danger)';
+      }
     }
   }
 
@@ -786,9 +1011,20 @@ document.addEventListener('DOMContentLoaded', () => {
     reposCardsGrid.innerHTML = '';
 
     const query = search.toLowerCase();
-    const repos = analyticsData.repositories.filter(r => {
-      return r.name.toLowerCase().includes(query) || r.description.toLowerCase().includes(query) || r.branch.toLowerCase().includes(query);
+    const repos = (analyticsData.repositories || []).filter(r => {
+      const name = (r.name || '').toLowerCase();
+      const desc = (r.description || '').toLowerCase();
+      const branch = (r.branch || 'main').toLowerCase();
+      return name.includes(query) || desc.includes(query) || branch.includes(query);
     });
+
+    if (!repos.length) {
+      const empty = document.createElement('p');
+      empty.className = 'repos-empty-state';
+      empty.textContent = 'No repositories found';
+      reposCardsGrid.appendChild(empty);
+      return;
+    }
 
     repos.forEach(repo => {
       const card = document.createElement('div');
@@ -796,15 +1032,15 @@ document.addEventListener('DOMContentLoaded', () => {
       card.innerHTML = `
         <div class="repo-card-top">
           <div>
-            <h4 class="repo-card-name">${repo.name}</h4>
-            <p class="repo-card-desc">${repo.description}</p>
+            <h4 class="repo-card-name">${escapeHtml(repo.name || '')}</h4>
+            <p class="repo-card-desc">${escapeHtml(repo.description || '')}</p>
           </div>
-          <span class="badge badge-success">${repo.status}</span>
+          <span class="badge badge-success">${escapeHtml(repo.status || '')}</span>
         </div>
         <div class="repo-card-footer">
-          <span class="branch-pill">🌿 ${repo.branch}</span>
-          <span>${repo.worktreesCount} active worktrees</span>
-          <span style="color:var(--text-muted);">${repo.lastSync}</span>
+          <span class="branch-pill">🌿 ${escapeHtml(repo.branch || 'main')}</span>
+          <span>${escapeHtml(String(repo.worktreesCount || 0))} active worktrees</span>
+          <span style="color:var(--text-muted);">${escapeHtml(repo.lastSync || '')}</span>
         </div>
       `;
       reposCardsGrid.appendChild(card);
@@ -849,6 +1085,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // Update brand name & current project title
+      if (data.workspace?.id) {
+        currentProjectId = data.workspace.id;
+      }
       const brandTitle = document.getElementById('brand-title');
       if (brandTitle && data.workspace?.name) {
         brandTitle.textContent = data.workspace.name;
@@ -955,9 +1194,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (backupModel) backupModel.value = agent.backup_model || '';
 
-    // Seed cockpit initial feed for selected agent
-    if (!teamRoomChatFeed || teamRoomChatFeed.children.length <= 1) {
-      seedInitialCockpitFeed(agent);
+    // Load real persisted messages for selected agent or honest empty state
+    loadAgentRoomFeed(agent);
+    if (teamChatInput) {
+      teamChatInput.placeholder = `Ask ${agent.name} to code, review, or orchestrate... (Enter to send, Shift+Enter for new line)`;
     }
   }
 
@@ -967,20 +1207,50 @@ document.addEventListener('DOMContentLoaded', () => {
     const query = (agentSearchInput?.value || '').trim().toLowerCase();
     const filtered = liveAgents.filter(agent => {
       const status = getAgentStatus(agent);
-      const matchesFilter = activeAgentFilter === 'all' || status === activeAgentFilter;
+      const matchesFilter = activeAgentFilter === 'all' || activeAgentFilter === 'groups' || status === activeAgentFilter;
       const text = `${agent.name} ${agent.role} ${agent.provider} ${agent.model}`.toLowerCase();
       return matchesFilter && (!query || text.includes(query));
     });
-    const groups = [
-      ['needs-you', 'NEEDS YOU'],
-      ['review', 'TO REVIEW'],
-      ['working', 'WORKING'],
-      ['available', 'AVAILABLE']
-    ];
 
-    groups.forEach(([status, label]) => {
-      const agents = filtered.filter(agent => getAgentStatus(agent) === status);
-      if (!agents.length) return;
+    let renderedGroups = [];
+    if (activeAgentFilter === 'groups') {
+      const roleCategories = [
+        {
+          id: 'planning',
+          label: 'PLANNING & ARCHITECTURE',
+          filter: (a) => /architect|product|business|analyst/i.test(a.role || '')
+        },
+        {
+          id: 'engineering',
+          label: 'ENGINEERING',
+          filter: (a) => /developer|engineer|full-stack/i.test(a.role || '')
+        },
+        {
+          id: 'qa-delivery',
+          label: 'QA & DELIVERY',
+          filter: (a) => /tester|qa|integrator|devops/i.test(a.role || '') || !(/architect|product|business|analyst|developer|engineer|full-stack/i.test(a.role || ''))
+        }
+      ];
+      roleCategories.forEach(cat => {
+        const agents = filtered.filter(cat.filter);
+        if (!agents.length) return;
+        renderedGroups.push({ status: cat.id, label: cat.label, agents });
+      });
+    } else {
+      const statusGroups = [
+        ['needs-you', 'NEEDS YOU'],
+        ['review', 'TO REVIEW'],
+        ['working', 'WORKING'],
+        ['available', 'AVAILABLE']
+      ];
+      statusGroups.forEach(([status, label]) => {
+        const agents = filtered.filter(agent => getAgentStatus(agent) === status);
+        if (!agents.length) return;
+        renderedGroups.push({ status, label, agents });
+      });
+    }
+
+    renderedGroups.forEach(({ status, label, agents }) => {
       const group = document.createElement('section');
       group.className = `agent-status-group status-${status}`;
       const heading = document.createElement('h4');
@@ -991,12 +1261,14 @@ document.addEventListener('DOMContentLoaded', () => {
       agents.forEach(agent => {
         const row = document.createElement('button');
         const humanOwned = isAgentHumanOwned(agent);
+        const cardStatus = getAgentStatus(agent);
         row.type = 'button';
         row.className = `agent-roster-row agentsroom-agent-card ${agent.name === selectedAgentName ? 'selected' : ''}`;
         row.dataset.agentName = agent.name;
-        row.dataset.status = status;
+        row.dataset.agentId = agent.id || agent.name;
+        row.dataset.status = cardStatus;
         row.setAttribute('aria-pressed', String(agent.name === selectedAgentName));
-        row.setAttribute('aria-label', `${agent.name}, ${agent.role || 'Agent'}, ${humanOwned ? 'human owned' : agentStatusMeta[status].label}`);
+        row.setAttribute('aria-label', `${agent.name}, ${agent.role || 'Agent'}, ${humanOwned ? 'human owned' : (agentStatusMeta[cardStatus]?.label || cardStatus)}`);
 
         const avatar = document.createElement('span');
         avatar.className = 'agent-roster-avatar agent-card-avatar';
@@ -1005,7 +1277,7 @@ document.addEventListener('DOMContentLoaded', () => {
         avatar.style.setProperty('--agent-avatar-color', color);
         avatar.style.background = color;
         avatar.setAttribute('aria-hidden', 'true');
-        if (status === 'needs-you') {
+        if (cardStatus === 'needs-you') {
           const badge = document.createElement('span');
           badge.className = 'agent-card-badge';
           badge.textContent = '✦';
@@ -1052,39 +1324,40 @@ document.addEventListener('DOMContentLoaded', () => {
     const elCountToReview = document.getElementById('count-to-review');
     const elCountWorking = document.getElementById('count-working');
     const elNeedsInputCount = document.getElementById('needs-input-count');
+    const elTurnsCount = document.getElementById('topbar-turns-count');
 
     if (elCountNeedsYou) elCountNeedsYou.textContent = String(needsYouCount);
     if (elCountToReview) elCountToReview.textContent = String(toReviewCount);
     if (elCountWorking) elCountWorking.textContent = String(workingCount || 2);
-    if (elNeedsInputCount) elNeedsInputCount.textContent = String(needsYouCount || 1);
+    if (elNeedsInputCount) elNeedsInputCount.textContent = String(needsYouCount);
+    if (elTurnsCount) elTurnsCount.textContent = String(workingCount || (isPromptInFlight ? 1 : 0));
 
-    const counts = groups.map(([status, label]) => ({ status, label, count: liveAgents.filter(agent => getAgentStatus(agent) === status).length }));
-    if (agentStatusSummary) {
-      agentStatusSummary.replaceChildren();
-      counts.forEach(({ status, label, count }) => {
-        if (!count) return;
-        const item = document.createElement('div');
-        item.className = `agent-summary-item status-${status}`;
-        item.innerHTML = `<i aria-hidden="true"></i><strong>${count}</strong><span>${label}</span>`;
-        agentStatusSummary.appendChild(item);
-      });
-    }
+    // Preserve existing agent-status-summary DOM nodes and dispatch rendered event for cockpit
+    window.dispatchEvent(new CustomEvent('agentcrew:roster-rendered'));
   }
 
-  function selectAgent(agent) {
+  function selectAgent(agentOrName) {
+    const agent = (typeof agentOrName === 'string')
+      ? liveAgents.find(item => item.name === agentOrName)
+      : agentOrName;
     if (!agent) return;
     const changedAgent = selectedAgentName && selectedAgentName !== agent.name;
     if (changedAgent && ptySocket) disconnectPty();
     if (changedAgent && backupFeedback) backupFeedback.textContent = '';
     selectedAgentName = agent.name;
+    window.agentCrewCurrentAgent = agent;
     updateAgentWorkspace(agent);
     renderAgentRoster();
     if (takeoverTokens.has(agent.name) && (!ptySocket || changedAgent)) connectPty(agent.name);
   }
 
+  window.agentCrewSelectedAgent = () => {
+    return liveAgents.find(item => item.name === selectedAgentName) || window.agentCrewCurrentAgent || liveAgents[0] || null;
+  };
+  window.agentCrewRefreshAgents = loadAgents;
+
   function selectAgentByName(name) {
-    const agent = liveAgents.find(item => item.name === name);
-    if (agent) selectAgent(agent);
+    selectAgent(name);
   }
 
   agentFilterButtons.forEach(button => {
@@ -1101,14 +1374,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (agentSearchInput) agentSearchInput.addEventListener('input', renderAgentRoster);
   if (agentSelect) agentSelect.addEventListener('change', () => selectAgentByName(agentSelect.value));
-
-  document.addEventListener('keydown', event => {
-    if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey &&
-      !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
-      event.preventDefault();
-      agentSearchInput?.focus();
-    }
-  });
 
   // Load Agent Stations
   async function loadAgents() {
@@ -1150,19 +1415,34 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const res = await fetch('/api/v1/readiness');
       const data = await res.json();
-      if (!providerBadges) return;
-      providerBadges.innerHTML = '';
       const list = data.providers || [];
-      list.forEach(p => {
-        const badge = document.createElement('span');
-        const statusLabel = p.status === 'available' ? 'Available'
-          : p.status === 'quota_limited' ? 'Quota limited' : 'Unavailable';
-        badge.className = `badge ${p.status === 'available' ? 'badge-success' : 'badge-warning'}`;
-        const reset = p.reset_at ? ` · resets ${new Date(p.reset_at).toLocaleTimeString()}` : '';
-        badge.textContent = `Provider ${p.name}: ${statusLabel}${reset}`;
-        const affectedAgents = p.agents?.length ? ` Assigned agents: ${p.agents.join(', ')}.` : '';
-        badge.title = `${p.reason || `${p.name} runner detected`}${affectedAgents}`;
-        providerBadges.appendChild(badge);
+
+      if (providerBadges) {
+        providerBadges.innerHTML = '';
+        list.forEach(p => {
+          const badge = document.createElement('span');
+          const statusLabel = p.status === 'available' ? 'Available'
+            : p.status === 'quota_limited' ? 'Quota limited' : 'Unavailable';
+          badge.className = `badge ${p.status === 'available' ? 'badge-success' : 'badge-warning'}`;
+          const reset = p.reset_at ? ` · resets ${new Date(p.reset_at).toLocaleTimeString()}` : '';
+          badge.textContent = `Provider ${p.name}: ${statusLabel}${reset}`;
+          const affectedAgents = p.agents?.length ? ` Assigned agents: ${p.agents.join(', ')}.` : '';
+          badge.title = `${p.reason || `${p.name} runner detected`}${affectedAgents}`;
+          providerBadges.appendChild(badge);
+        });
+      }
+
+      // Update provider cards dynamically in #view-observability
+      document.querySelectorAll('#view-observability .provider-box').forEach(box => {
+        const strong = box.querySelector('strong')?.textContent.toLowerCase() || '';
+        const badge = box.querySelector('.provider-header .badge');
+        if (!badge) return;
+        const matched = list.find(p => strong.includes(p.name.toLowerCase()));
+        if (matched) {
+          const isAvail = matched.status === 'available';
+          badge.className = `badge ${isAvail ? 'badge-success' : (matched.status === 'quota_limited' ? 'badge-warning' : 'badge-danger')}`;
+          badge.textContent = isAvail ? 'Qualified' : (matched.status === 'quota_limited' ? 'Quota Limited' : 'Unavailable');
+        }
       });
     } catch (err) {
       log(`Readiness probe failed: ${err.message}`, 'action');
@@ -1174,10 +1454,51 @@ document.addEventListener('DOMContentLoaded', () => {
     const sse = new EventSource('/api/v1/events');
     const concDisplay = document.getElementById('concurrency-display');
 
+    sse.addEventListener('agent.updated', async () => {
+      await loadAgents();
+    });
+
+    sse.addEventListener('task.updated', async () => {
+      await loadTasks();
+    });
+
+    sse.addEventListener('popup_created', async () => {
+      await Promise.all([loadTasks(), loadPopups()]);
+    });
+
+    sse.addEventListener('agent.delta', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const deltaText = data.delta || data.text || '';
+        if (!deltaText) return;
+        const pendingMsg = document.getElementById('chat-pending-msg');
+        if (pendingMsg) {
+          let deltaContainer = pendingMsg.querySelector('#chat-streaming-delta');
+          if (!deltaContainer) {
+            deltaContainer = document.createElement('div');
+            deltaContainer.id = 'chat-streaming-delta';
+            deltaContainer.className = 'chat-streaming-delta';
+            const chatBody = pendingMsg.querySelector('.chat-body') || pendingMsg;
+            chatBody.appendChild(deltaContainer);
+          }
+          deltaContainer.hidden = false;
+          deltaContainer.textContent += deltaText;
+          if (teamRoomChatFeed) teamRoomChatFeed.scrollTop = teamRoomChatFeed.scrollHeight;
+        }
+      } catch (_) {}
+    });
+
     sse.addEventListener('turn_concurrency', (e) => {
       const data = JSON.parse(e.data);
       if (concDisplay) {
         concDisplay.textContent = `${data.running} / ${data.max}`;
+      }
+      if (aiOrb) {
+        aiOrb.setActivity(data.running > 0 ? 0.85 : 0.0);
+      }
+      const orbStatusText = document.getElementById('orb-status-text');
+      if (orbStatusText) {
+        orbStatusText.textContent = data.running > 0 ? `WORKING · ${data.running} TURNS` : 'IDLE · STANDBY';
       }
     });
 
@@ -1211,15 +1532,81 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
+    sse.addEventListener('room.message', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (!data || !data.text) return;
+
+        // Optimistic reconciliation: if this is a human message that matches client turn id,
+        // attach real server message id and prevent duplicate bubble
+        const turnId = data.metadata?.turn_id || data.metadata?.client_turn_id || data.turn_id;
+        if (data.sender_type === 'human' && turnId) {
+          const existingBubble = document.querySelector(`[data-client-turn-id="${turnId}"]`);
+          if (existingBubble) {
+            if (data.id) {
+              existingBubble.dataset.messageId = data.id;
+              renderedMessageIds.add(data.id);
+            }
+            return;
+          }
+        }
+
+        if (data.id && renderedMessageIds.has(data.id)) return;
+
+        const isAgent = data.sender_type === 'agent';
+        const sender = data.sender_name || data.sender_id || 'Agent';
+        const currentAgent = (selectedAgentName || '').toLowerCase();
+
+        const matchesAgent = !selectedAgentName ||
+          sender.toLowerCase() === currentAgent ||
+          (data.text && data.text.toLowerCase().includes('@' + currentAgent)) ||
+          (data.metadata?.target_agent && data.metadata.target_agent.toLowerCase() === currentAgent);
+
+        if (matchesAgent) {
+          appendRoomMessage(data);
+          if (isAgent) {
+            const matchesInFlight = Boolean(inFlightAgentName && (data.sender_name || data.sender_id || '').toLowerCase() === inFlightAgentName.toLowerCase());
+            if (matchesInFlight) {
+              removePendingIndicator();
+              setPromptInFlight(false);
+            }
+            if (pixelRenderer) {
+              const preview = data.text.replace(/\[\d+m/g, '').replace(/[\r\n]+/g, ' ').slice(0, 28);
+              pixelRenderer.showSpeechBubble(sender, preview, 5000);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Error processing SSE room.message:', err);
+      }
+    });
+
     sse.addEventListener('agent_thinking', (e) => {
       const data = JSON.parse(e.data);
       pixelRenderer?.updateAgentStates([{ name: data.agent_id, state: 'thinking' }]);
     });
 
-    sse.addEventListener('agent_thinking_ended', (e) => {
-      const data = JSON.parse(e.data);
-      pixelRenderer?.updateAgentStates([{ name: data.agent_id, state: data.state || 'idle' }]);
+    sse.addEventListener('agent.thinking_started', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (window.agentCrewOrb) window.agentCrewOrb.setActivity(0.9);
+        const orbStatusText = document.getElementById('orb-status-text');
+        if (orbStatusText) orbStatusText.textContent = `WORKING · ${(data.agent_id || 'AGENT').toUpperCase()} THINKING`;
+        pixelRenderer?.updateAgentStates([{ name: data.agent_id, state: 'thinking' }]);
+      } catch (_) {}
     });
+
+    const handleThinkingEnded = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (Boolean(data.agent_id && inFlightAgentName && data.agent_id.toLowerCase() === inFlightAgentName.toLowerCase())) {
+          setPromptInFlight(false);
+        }
+        pixelRenderer?.updateAgentStates([{ name: data.agent_id, state: data.state || 'idle' }]);
+      } catch (_) {}
+    };
+    sse.addEventListener('agent_thinking_ended', handleThinkingEnded);
+    sse.addEventListener('agent.thinking_ended', handleThinkingEnded);
 
     sse.addEventListener('command_executed', (e) => {
       const data = JSON.parse(e.data);
@@ -1230,6 +1617,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     sse.addEventListener('project.activated', async (e) => {
       const data = JSON.parse(e.data);
+      currentProjectId = data.project?.id || data.project_id || currentProjectId;
       log(`Active project changed to ${data.project?.name || data.project_id}`, 'system');
       switchView('view-team-room');
       await loadProjects();
@@ -1415,7 +1803,7 @@ document.addEventListener('DOMContentLoaded', () => {
       terminalInstance?.focus();
       return;
     }
-    const keys = { escape: '\x1b', tab: '\t', left: '\x1b[D', right: '\x1b[C', up: '\x1b[A', down: '\x1b[B' };
+    const keys = { escape: '\x1b', tab: '\t', left: '\x1b[D', right: '\x1b[C', up: '\x1b[A', down: '\x1b[B', enter: '\r', c: '\x03' };
     controlPending = false;
     const ctrl = mobileKeys?.querySelector('[data-terminal-key="control"]');
     if (ctrl) ctrl.setAttribute('aria-pressed', 'false');
@@ -1599,49 +1987,70 @@ document.addEventListener('DOMContentLoaded', () => {
   // Load Tasks into Kanban
   async function loadTasks() {
     let tasks = [];
+    let fetchError = null;
     try {
       const res = await fetch('/api/v1/tasks');
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json();
-      if (Array.isArray(data.tasks) && data.tasks.length > 0) {
+      if (Array.isArray(data.tasks)) {
         tasks = data.tasks;
       }
     } catch (err) {
       console.warn('Failed to fetch tasks from /api/v1/tasks:', err);
+      fetchError = err;
     }
+    cachedTasks = tasks;
 
-    if (tasks.length === 0) {
-      tasks = [
-        { id: 'TASK-13', title: 'Provider Qualification Spikes (agy, Codex, Gemini)', stage: 'done', owner: 'Arthur (Architect)' },
-        { id: 'TASK-14', title: 'Workspace SQLite Schema & 13 Agent Identities', stage: 'done', owner: 'Dev-1' },
-        { id: 'TASK-15', title: 'Provider Plugin Engine & 4-Turn Scheduler', stage: 'done', owner: 'Dev-2' },
-        { id: 'TASK-16', title: 'Browser Session Takeover with 10s Soft Budget', stage: 'done', owner: 'Dev-3' },
-        { id: 'TASK-17', title: 'Requirements Intake & Joint Planning Package', stage: 'review', owner: 'Alice (BA)' },
-        { id: 'TASK-18', title: 'Worktree Task Lifecycle & Design Reviews', stage: 'qa', owner: 'QA-1 (Tester)' },
-        { id: 'TASK-19', title: 'Commit-Bound Approvals & Revision Invalidation', stage: 'done', owner: 'Dev-4' },
-        { id: 'TASK-20', title: 'Iteration Branch Integration Strategy', stage: 'in_progress', owner: 'Integrator-1' },
-        { id: 'TASK-21', title: 'Popup Scope Change Engine (P-xxx)', stage: 'planning', owner: 'Peter (PO)' },
-        { id: 'TASK-25', title: 'Supervisor HTTP & SSE Server Daemon', stage: 'done', owner: 'Dev-1' },
-        { id: 'TASK-26', title: 'Interactive Web UI Full-Screen Dashboards', stage: 'done', owner: 'Dev-2' },
-        { id: 'TASK-27', title: 'CLI Server Command & User Workflow', stage: 'done', owner: 'Dev-3' }
-      ];
-    }
+    const stages = [
+      { key: 'planning', label: 'Planning' },
+      { key: 'in_progress', label: 'In Progress' },
+      { key: 'review', label: 'Review' },
+      { key: 'qa', label: 'QA' },
+      { key: 'done', label: 'Done' }
+    ];
 
-    ['planning', 'in_progress', 'review', 'qa', 'done'].forEach(stage => {
+    stages.forEach(({ key: stage, label }) => {
       const col = document.getElementById(`tasks-${stage}`);
       if (!col) return;
-      col.innerHTML = '';
+      col.replaceChildren();
+
+      if (fetchError) {
+        const errEl = document.createElement('div');
+        errEl.className = 'kanban-error-state';
+        errEl.innerHTML = `
+          <span>Failed to load tasks</span>
+          <button type="button" class="btn btn-secondary btn-sm kanban-retry-btn">Retry</button>
+        `;
+        const retryBtn = errEl.querySelector('.kanban-retry-btn');
+        if (retryBtn) {
+          retryBtn.addEventListener('click', () => loadTasks());
+        }
+        col.appendChild(errEl);
+        return;
+      }
+
       const stageTasks = tasks.filter(t => t.stage === stage);
+      if (stageTasks.length === 0) {
+        const emptyEl = document.createElement('div');
+        emptyEl.className = 'kanban-empty-placeholder';
+        emptyEl.textContent = `No tasks in ${label}`;
+        col.appendChild(emptyEl);
+        return;
+      }
+
       stageTasks.forEach(task => {
         const item = document.createElement('div');
         item.className = 'task-item';
         const prioBadge = task.priority === 'high' ? '<span class="badge badge-warning" style="font-size:0.65rem; padding: 2px 6px;">high</span>' : '';
         item.innerHTML = `
           <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 4px;">
-            <span class="task-id" style="font-weight:700;">${task.id}</span>
+            <span class="task-id" style="font-weight:700;">${escapeHtml(task.id || '')}</span>
             ${prioBadge}
           </div>
-          <div class="task-title" style="font-weight:600; font-size:0.85rem; line-height: 1.3; margin-bottom: 4px;">${task.title}</div>
-          <div class="task-owner" style="font-size:0.75rem; color:var(--text-muted);">${task.owner}</div>
+          <div class="task-title" style="font-weight:600; font-size:0.85rem; line-height: 1.3; margin-bottom: 4px;">${escapeHtml(task.title || '')}</div>
+          <div class="task-owner" style="font-size:0.75rem; color:var(--text-muted);">${escapeHtml(task.owner || '')}</div>
         `;
         col.appendChild(item);
       });
@@ -1654,21 +2063,21 @@ document.addEventListener('DOMContentLoaded', () => {
       // 1. Fetch Pull Requests from live repo
       const prRes = await fetch('/api/v1/pull-requests');
       const prData = await prRes.json();
-      if (Array.isArray(prData.pullRequests) && prData.pullRequests.length > 0) {
-        analyticsData.pullRequests = prData.pullRequests;
-        renderPRList('all');
+      analyticsData.pullRequests = Array.isArray(prData.pullRequests) ? prData.pullRequests : [];
+      renderPRList('all');
+      if (analyticsData.pullRequests.length > 0) {
         if (window.matchMedia('(min-width: 1181px)').matches) {
           selectPR(analyticsData.pullRequests[0]);
         }
+      } else {
+        closePRPanel();
       }
 
       // 2. Fetch Repositories & Worktrees from live repo
       const repoRes = await fetch('/api/v1/repositories');
       const repoData = await repoRes.json();
-      if (Array.isArray(repoData.repositories) && repoData.repositories.length > 0) {
-        analyticsData.repositories = repoData.repositories;
-        renderRepositories('');
-      }
+      analyticsData.repositories = Array.isArray(repoData.repositories) ? repoData.repositories : [];
+      renderRepositories('');
 
       // 3. Fetch Analytics & KPIs from live repo
       const analRes = await fetch('/api/v1/analytics');
@@ -1701,6 +2110,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to fetch projects');
       const projects = Array.isArray(data.projects) ? data.projects : [];
+      const active = projects.find(p => p.is_active);
+      if (active) currentProjectId = active.id;
       renderProjectDock(projects);
     } catch (err) {
       console.warn('Could not load projects:', err);
@@ -1722,7 +2133,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (zoneProjects.length === 0) return;
 
       const group = document.createElement('div');
-      group.className = 'dock-zone-group';
+      group.className = 'dock-zone-group project-zone-group';
 
       zoneProjects.forEach(proj => {
         const item = document.createElement('button');
@@ -1731,8 +2142,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const initial = (proj.name || 'P').trim().charAt(0).toUpperCase();
         item.title = `${proj.name} (${proj.mode === 'multi_worktree' ? 'Multi-Worktree' : 'Independent'})\n${proj.path}`;
         item.innerHTML = `
-          <div class="project-dock-avatar">${initial}</div>
-          <span class="project-dock-tooltip">${proj.name}</span>
+          <div class="project-dock-avatar">${escapeHtml(initial)}</div>
+          <span class="project-dock-tooltip">${escapeHtml(proj.name)}</span>
         `;
         item.addEventListener('click', async () => {
           if (proj.is_active) {
@@ -1745,6 +2156,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const actData = await actRes.json();
             if (!actRes.ok) throw new Error(actData.error || 'Activation failed');
+            currentProjectId = proj.id;
             log(`Switched active project to ${proj.name}`, 'system');
             switchView('view-team-room');
             await loadProjects();
@@ -1792,31 +2204,522 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // --- Slack-like Chat Sender ---
-  async function sendChatMessage() {
-    if (!teamChatInput || !teamChatInput.value.trim()) return;
-    const text = teamChatInput.value.trim();
-    teamChatInput.value = '';
-    const agentId = selectedAgentName || agentSelect?.value || 'Dev-1';
+  // --- Shared Accessible Dialog Modal & Global Toast Notifications (Phase 2) ---
+  const sharedDialogModal = document.getElementById('shared-dialog-modal');
+  const sharedDialogCard = document.getElementById('shared-dialog-card');
+  const sharedDialogTitle = document.getElementById('shared-dialog-title');
+  const sharedDialogSubtitle = document.getElementById('shared-dialog-subtitle');
+  const sharedDialogBody = document.getElementById('shared-dialog-body');
+  const btnCloseSharedDialog = document.getElementById('btn-close-shared-dialog');
+  const globalToastContainer = document.getElementById('global-toast-container');
+  let activeModalCloseHandler = null;
+  let lastDialogTrigger = null;
 
-    appendChatMessage('You', text, false);
+  function openModalDialog({ title, subtitle, contentHtml, onRender, onClose }) {
+    if (!sharedDialogModal || !sharedDialogBody) return;
+    lastDialogTrigger = document.activeElement;
+    if (sharedDialogTitle) sharedDialogTitle.textContent = title || 'Dialog';
+    if (sharedDialogSubtitle) {
+      if (subtitle) {
+        sharedDialogSubtitle.textContent = subtitle;
+        sharedDialogSubtitle.hidden = false;
+      } else {
+        sharedDialogSubtitle.hidden = true;
+      }
+    }
+    sharedDialogBody.innerHTML = contentHtml || '';
+    sharedDialogModal.hidden = false;
+    activeModalCloseHandler = onClose || null;
 
+    if (typeof onRender === 'function') {
+      try { onRender(sharedDialogBody); } catch (err) { console.warn('Dialog onRender error:', err); }
+    }
+
+    const firstFocusable = sharedDialogCard?.querySelector('input:not([type="hidden"]), select, textarea, button:not(#btn-close-shared-dialog)') || btnCloseSharedDialog;
+    firstFocusable?.focus();
+  }
+
+  function closeModalDialog() {
+    if (!sharedDialogModal || sharedDialogModal.hidden) return;
+    sharedDialogModal.hidden = true;
+    if (sharedDialogBody) sharedDialogBody.innerHTML = '';
+    if (typeof activeModalCloseHandler === 'function') {
+      const handler = activeModalCloseHandler;
+      activeModalCloseHandler = null;
+      try { handler(); } catch (_) {}
+    }
+    if (lastDialogTrigger && typeof lastDialogTrigger.focus === 'function') {
+      try { lastDialogTrigger.focus(); } catch (_) {}
+      lastDialogTrigger = null;
+    }
+  }
+
+  if (btnCloseSharedDialog) {
+    btnCloseSharedDialog.addEventListener('click', closeModalDialog);
+  }
+
+  if (sharedDialogModal) {
+    sharedDialogModal.addEventListener('click', (e) => {
+      if (e.target === sharedDialogModal) {
+        closeModalDialog();
+      }
+    });
+
+    sharedDialogModal.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') {
+        const focusables = Array.from(sharedDialogCard?.querySelectorAll(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        ) || []);
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first || !sharedDialogCard?.contains(document.activeElement)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last || !sharedDialogCard?.contains(document.activeElement)) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    });
+  }
+
+  function showToast(message, type = 'info', durationMs = 3500) {
+    if (!globalToastContainer) return;
+    const toast = document.createElement('div');
+    toast.className = `global-toast-item toast-${type}`;
+    const icon = type === 'success' ? '✓' : type === 'error' ? '✕' : type === 'warning' ? '⚠' : 'ℹ';
+    toast.innerHTML = `
+      <span class="toast-icon">${icon}</span>
+      <span class="toast-message">${escapeHtml(message)}</span>
+      <button type="button" class="global-toast-close" aria-label="Close notification">✕</button>
+    `;
+    const closeBtn = toast.querySelector('.global-toast-close');
+    let timer = null;
+    const dismiss = () => {
+      if (timer) clearTimeout(timer);
+      toast.style.opacity = '0';
+      toast.style.transform = 'translateY(8px) scale(0.96)';
+      toast.style.transition = 'all 0.15s ease';
+      setTimeout(() => toast.remove(), 160);
+    };
+    closeBtn?.addEventListener('click', dismiss);
+    timer = setTimeout(dismiss, durationMs);
+    globalToastContainer.appendChild(toast);
+  }
+
+  // --- Cross-Module Synchronization Hooks & Public API ---
+  window.agentCrewRefreshTasks = loadTasks;
+  window.agentCrewRefreshAgents = loadAgents;
+  window.agentCrewReloadFeed = () => {
+    const ag = liveAgents.find(a => a.name === selectedAgentName);
+    if (ag) loadAgentRoomFeed(ag);
+  };
+  window.openModalDialog = openModalDialog;
+  window.closeModalDialog = closeModalDialog;
+  window.showToast = showToast;
+
+  // --- Scope Modifications & Popups (P-xxx Tickets) ---
+  async function loadPopups() {
+    const popupList = document.getElementById('popup-list');
+    if (!popupList) return;
+    try {
+      const res = await fetch('/api/v1/popups');
+      if (!res.ok) throw new Error('Failed to fetch popups');
+      const data = await res.json();
+      const popups = Array.isArray(data.popups) ? data.popups : [];
+      popupList.replaceChildren();
+
+      if (!popups.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = 'No active scope modification tickets. Click "Propose Scope Change" to record mid-flight requirement adjustments.';
+        popupList.appendChild(empty);
+        return;
+      }
+
+      popups.forEach(ticket => {
+        const item = document.createElement('div');
+        item.className = 'popup-item';
+        item.dataset.ticketId = ticket.id;
+
+        const isAwaiting = ticket.status === 'awaiting_approval';
+        const delay = ticket.impact?.estimatedDelayHours || 0;
+        const tasks = (ticket.affectedTasks || []).join(', ') || 'None';
+
+        item.innerHTML = `
+          <div class="popup-item-header">
+            <div>
+              <span class="popup-ticket-id">${escapeHtml(ticket.id)}</span>
+              <strong style="margin-left: 8px;">${escapeHtml(ticket.title || 'Scope Change')}</strong>
+            </div>
+            <span class="badge ${ticket.status === 'approved' ? 'badge-success' : (ticket.status === 'rejected' ? 'badge-danger' : 'badge-warning')}">${escapeHtml(ticket.status || 'unknown')}</span>
+          </div>
+          <p style="margin: 4px 0; font-size: 13px; color: var(--text-muted);">${escapeHtml(ticket.description || ticket.impact?.discardedWorkSummary || 'No details provided.')}</p>
+          <div style="font-size: 12px; color: #94a3b8;">
+            <span>Affected: <strong>${escapeHtml(tasks)}</strong></span> ·
+            <span>Est. Delay: <strong>${delay}h</strong></span> ·
+            <span>Req by: <strong>${escapeHtml(ticket.requestedBy || 'operator')}</strong></span>
+          </div>
+          ${isAwaiting ? `
+            <div class="popup-item-actions">
+              <button type="button" class="btn btn-sm btn-success btn-approve-popup" data-ticket-id="${escapeHtml(ticket.id)}">Approve Scope</button>
+              <button type="button" class="btn btn-sm btn-danger btn-reject-popup" data-ticket-id="${escapeHtml(ticket.id)}">Reject</button>
+            </div>
+          ` : ''}
+        `;
+
+        item.querySelector('.btn-approve-popup')?.addEventListener('click', async () => {
+          await decidePopup(ticket.id, 'approve');
+        });
+        item.querySelector('.btn-reject-popup')?.addEventListener('click', async () => {
+          await decidePopup(ticket.id, 'reject');
+        });
+
+        popupList.appendChild(item);
+      });
+    } catch (err) {
+      console.warn('Could not load popups:', err);
+    }
+  }
+
+  async function decidePopup(ticketId, decision) {
     try {
       const res = await fetch('/api/v1/commands', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          command_type: 'session.exec',
-          payload: { agent_id: agentId, command: text, mode: 'chat', takeover_token: takeoverTokens.get(agentId) }
+          command_type: 'popup.decide',
+          payload: { ticket_id: ticketId, decision }
         })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to send chat');
-      if (data.result && data.result.output) {
-        appendChatMessage(agentId, data.result.output, true);
+      if (!res.ok) throw new Error(data.error || `Failed to ${decision} popup`);
+      showToast(`Scope ticket ${ticketId} ${decision}d.`, 'success');
+      await Promise.all([loadTasks(), loadPopups()]);
+    } catch (err) {
+      showToast(err.message, 'warning');
+      await Promise.all([loadTasks(), loadPopups()]);
+    }
+  }
+
+  const btnNewPopup = document.getElementById('btn-new-popup');
+  if (btnNewPopup) {
+    btnNewPopup.addEventListener('click', () => {
+      openModalDialog({
+        title: 'Propose Scope Change (P-xxx)',
+        subtitle: 'Record mid-flight requirement adjustments and pause affected tasks for operator sign-off',
+        contentHtml: `
+          <form id="form-new-popup" style="display:flex;flex-direction:column;gap:12px;">
+            <div>
+              <label style="display:block;margin-bottom:4px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Change Title</label>
+              <input type="text" id="popup-input-title" required placeholder="e.g. Add JWT token expiry" style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;box-sizing:border-box;">
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:4px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Description & Rationale</label>
+              <textarea id="popup-input-description" rows="3" required placeholder="Describe why this scope adjustment is necessary..." style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;box-sizing:border-box;resize:vertical;"></textarea>
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:4px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Affected Tasks (comma-separated IDs)</label>
+              <input type="text" id="popup-input-tasks" placeholder="e.g. TASK-14, TASK-18" style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;box-sizing:border-box;">
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:4px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Estimated Delay (hours)</label>
+              <input type="number" id="popup-input-delay" min="0" value="2" style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;box-sizing:border-box;">
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+              <button type="button" class="btn btn-secondary" id="btn-cancel-popup">Cancel</button>
+              <button type="submit" class="btn btn-warning" id="btn-submit-popup">Propose Ticket</button>
+            </div>
+          </form>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-cancel-popup')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#form-new-popup')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const title = body.querySelector('#popup-input-title')?.value.trim();
+            const description = body.querySelector('#popup-input-description')?.value.trim();
+            const affectedStr = body.querySelector('#popup-input-tasks')?.value.trim() || '';
+            const delayHours = Number(body.querySelector('#popup-input-delay')?.value) || 0;
+            const affectedTasks = affectedStr.split(',').map(s => s.trim()).filter(Boolean);
+
+            const submitBtn = body.querySelector('#btn-submit-popup');
+            if (submitBtn) submitBtn.disabled = true;
+
+            try {
+              const res = await fetch('/api/v1/commands', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  command_type: 'popup.propose',
+                  payload: {
+                    title,
+                    description,
+                    estimated_impact: {
+                      affected_tasks: affectedTasks,
+                      delay_hours: delayHours
+                    }
+                  }
+                })
+              });
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || 'Failed to propose scope change');
+              closeModalDialog();
+              showToast(`Scope change ticket ${data.result?.ticket?.id || 'P-xxx'} proposed!`, 'success');
+              await Promise.all([loadTasks(), loadPopups()]);
+            } catch (err) {
+              showToast(err.message, 'warning');
+              if (submitBtn) submitBtn.disabled = false;
+            }
+          });
+        }
+      });
+    });
+  }
+
+  // --- Composer Attachments State & Renderer (Phase 2) ---
+  const activeComposerAttachments = {
+    tools: new Set(),
+    context: new Set(),
+    docs: new Set()
+  };
+
+  function renderComposerAttachments() {
+    const container = document.getElementById('composer-attachments');
+    if (!container) return;
+    container.replaceChildren();
+
+    const totalCount = activeComposerAttachments.tools.size + activeComposerAttachments.context.size + activeComposerAttachments.docs.size;
+    if (totalCount === 0) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+
+    activeComposerAttachments.tools.forEach(tool => {
+      const chip = createAttachmentChip('🔧', `tool:${tool}`, () => {
+        activeComposerAttachments.tools.delete(tool);
+        renderComposerAttachments();
+      });
+      container.appendChild(chip);
+    });
+
+    activeComposerAttachments.context.forEach(ctx => {
+      const chip = createAttachmentChip('📎', ctx, () => {
+        activeComposerAttachments.context.delete(ctx);
+        renderComposerAttachments();
+      });
+      container.appendChild(chip);
+    });
+
+    activeComposerAttachments.docs.forEach(doc => {
+      const chip = createAttachmentChip('📖', doc, () => {
+        activeComposerAttachments.docs.delete(doc);
+        renderComposerAttachments();
+      });
+      container.appendChild(chip);
+    });
+  }
+
+  function createAttachmentChip(icon, label, onRemove) {
+    const chip = document.createElement('div');
+    chip.className = 'attachment-chip';
+    chip.innerHTML = `
+      <span>${icon}</span>
+      <span class="chip-label">${escapeHtml(label)}</span>
+      <button type="button" class="chip-remove-btn" aria-label="Remove ${escapeHtml(label)}">✕</button>
+    `;
+    chip.querySelector('.chip-remove-btn').addEventListener('click', onRemove);
+    return chip;
+  }
+
+  // --- Slack-like Chat Sender ---
+  async function sendChatMessage() {
+    if (!teamChatInput) return;
+    const rawText = teamChatInput.value;
+    const trimmed = rawText.trim();
+    if (!trimmed) return;
+    if (isPromptInFlight) return; // Prevent duplicate send while in flight
+
+    const targetAgent = liveAgents.find(a => a.name === selectedAgentName) || liveAgents[0] || { name: 'Dev-1', role: 'Full-Stack Developer' };
+    const agentName = targetAgent.name || 'Dev-1';
+
+    const myController = new AbortController();
+    promptAbortController = myController;
+    inFlightAgentName = agentName;
+    setPromptInFlight(true, `WORKING · ${agentName.toUpperCase()} THINKING`);
+
+    // Optimistically clear input, preserving rawText in case of failure
+    teamChatInput.value = '';
+
+    // Snapshot and clear attachments at send start
+    const sentTools = [...activeComposerAttachments.tools];
+    const sentContext = [...activeComposerAttachments.context];
+    const sentDocs = [...activeComposerAttachments.docs];
+    activeComposerAttachments.tools.clear();
+    activeComposerAttachments.context.clear();
+    activeComposerAttachments.docs.clear();
+    renderComposerAttachments();
+
+    // Append human message to feed (appendRoomMessage records renderedMessageIds)
+    const tempMsgId = 'human-' + Date.now();
+    const optimisticBubble = appendRoomMessage({
+      id: tempMsgId,
+      client_turn_id: tempMsgId,
+      sender_name: 'You',
+      sender_type: 'human',
+      text: trimmed,
+      created_at: new Date().toISOString()
+    });
+    if (optimisticBubble) {
+      optimisticBubble.dataset.clientTurnId = tempMsgId;
+    }
+
+    // Show pending indicator in feed
+    appendPendingIndicator(agentName);
+
+    // Format text with mention if not present
+    const mention = `@${agentName}`;
+    let dispatchText = trimmed.includes(mention) ? trimmed : `${mention} ${trimmed}`;
+
+    const attachmentNotes = [];
+    if (sentTools.length > 0) attachmentNotes.push(`Tools: [${sentTools.join(', ')}]`);
+    if (sentContext.length > 0) attachmentNotes.push(`Context: [${sentContext.join(', ')}]`);
+    if (sentDocs.length > 0) attachmentNotes.push(`Docs: [${sentDocs.join(', ')}]`);
+    if (attachmentNotes.length > 0) {
+      dispatchText += '\n\n' + attachmentNotes.join(' · ');
+    }
+
+    try {
+      let dispatched = false;
+
+      // 1. Primary dispatch via POST /api/v1/room/messages
+      try {
+        const res = await fetch('/api/v1/room/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            channel: 'team-activity',
+            sender_type: 'human',
+            sender_id: 'operator',
+            sender_name: 'You',
+            text: dispatchText,
+            metadata: {
+              target_agent: agentName,
+              turn_id: tempMsgId,
+              client_turn_id: tempMsgId,
+              attached_tools: sentTools,
+              attached_context: sentContext,
+              attached_docs: sentDocs
+            }
+          }),
+          signal: myController.signal
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.message?.id) {
+            renderedMessageIds.add(data.message.id);
+          }
+          if (data.dispatched === false) {
+            if (promptAbortController === myController) {
+              removePendingIndicator();
+              setPromptInFlight(false);
+            }
+            showToast(data.reason || 'Message saved (scheduler paused)', 'warning');
+            return;
+          }
+          dispatched = true;
+        }
+      } catch (postErr) {
+        if (postErr.name === 'AbortError') throw postErr;
+        console.warn('POST /api/v1/room/messages failed, trying takeover fallback:', postErr);
+      }
+
+      // 2. Fallback to session.takeover + session.exec if room/messages was not accepted
+      if (!dispatched) {
+        let token = takeoverTokens.get(agentName);
+        if (!token) {
+          const tokRes = await fetch('/api/v1/commands', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command_type: 'session.takeover',
+              payload: { agent_id: agentName }
+            }),
+            signal: myController.signal
+          });
+          const tokData = await tokRes.json();
+          if (tokData.result?.takeover_token) {
+            token = tokData.result.takeover_token;
+            takeoverTokens.set(agentName, token);
+            persistTakeoverTokens();
+          }
+        }
+
+        const execRes = await fetch('/api/v1/commands', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            command_type: 'session.exec',
+            payload: {
+              agent_id: agentName,
+              command: dispatchText,
+              mode: 'chat',
+              takeover_token: token
+            }
+          }),
+          signal: myController.signal
+        });
+        const execData = await execRes.json();
+        if (!execRes.ok) throw new Error(execData.error || 'Failed to dispatch prompt');
+        if (execData.result && execData.result.output) {
+          if (promptAbortController === myController) {
+            removePendingIndicator();
+            setPromptInFlight(false);
+          }
+          const replyId = 'reply-' + Date.now();
+          appendRoomMessage({
+            id: replyId,
+            sender_name: agentName,
+            sender_type: 'agent',
+            text: execData.result.output,
+            created_at: new Date().toISOString()
+          });
+        }
       }
     } catch (err) {
-      appendChatMessage('System', `Error sending message: ${err.message}`, false, '!');
+      if (promptAbortController === myController) {
+        removePendingIndicator();
+        setPromptInFlight(false);
+        promptAbortController = null;
+      }
+      if (err.name === 'AbortError') {
+        appendRoomMessage('System', 'Prompt cancelled by operator.', false, '!');
+      } else {
+        // PRESERVE INPUT TEXT NON-DESTRUCTIVELY ON FAILURE
+        if (!teamChatInput.value.trim()) {
+          teamChatInput.value = rawText;
+        } else {
+          teamChatInput.value = rawText + '\n' + teamChatInput.value;
+        }
+        sentTools.forEach(t => activeComposerAttachments.tools.add(t));
+        sentContext.forEach(c => activeComposerAttachments.context.add(c));
+        sentDocs.forEach(d => activeComposerAttachments.docs.add(d));
+        renderComposerAttachments();
+        appendRoomMessage('System', `Error sending prompt: ${err.message}`, false, '!');
+      }
+    } finally {
+      if (promptAbortController === myController) {
+        promptAbortController = null;
+      }
     }
   }
 
@@ -1824,10 +2727,16 @@ document.addEventListener('DOMContentLoaded', () => {
     btnSendChat.addEventListener('click', sendChatMessage);
     teamChatInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.isComposing || e.keyCode === 229) return;
         e.preventDefault();
         sendChatMessage();
       }
     });
+  }
+
+  const btnCancelChat = document.getElementById('btn-cancel-chat');
+  if (btnCancelChat) {
+    btnCancelChat.addEventListener('click', cancelPendingPrompt);
   }
 
   // --- AgentsRoom Cockpit Utility Controls ---
@@ -1850,23 +2759,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // AgentsRoom Cockpit Utility Controls (delegated to cockpit-actions.js)
   const btnToggleFilesChanges = document.getElementById('btn-toggle-files-changes');
-  if (btnToggleFilesChanges) {
-    btnToggleFilesChanges.addEventListener('click', () => {
-      switchView('view-reviews');
-    });
-  }
-
   const btnRailChat = document.getElementById('btn-rail-chat');
-  if (btnRailChat) {
-    btnRailChat.addEventListener('click', () => {
-      switchView('view-team-room');
-      if (panelChatView) panelChatView.hidden = false;
-      if (panelTerminalView) panelTerminalView.hidden = true;
-      teamChatInput?.focus();
-    });
-  }
 
+  // --- Topbar Controls & Quick Switchers ---
   document.getElementById('topbar-home-btn')?.addEventListener('click', () => switchView('view-overview'));
   document.getElementById('topbar-inbox-btn')?.addEventListener('click', () => switchView('view-kanban'));
   document.getElementById('btn-topbar-team')?.addEventListener('click', () => switchView('view-team-room'));
@@ -1875,7 +2772,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-topbar-settings')?.addEventListener('click', () => switchView('view-settings'));
   document.getElementById('footer-settings-btn')?.addEventListener('click', () => switchView('view-settings'));
   document.getElementById('btn-open-backlog')?.addEventListener('click', () => switchView('view-kanban'));
-  document.getElementById('btn-open-ideas')?.addEventListener('click', () => switchView('view-kanban'));
   document.getElementById('btn-close-cockpit')?.addEventListener('click', () => switchView('view-overview'));
 
   document.getElementById('topbar-add-btn')?.addEventListener('click', () => {
@@ -1891,6 +2787,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyTheme(next, true);
   });
 
+  // Topbar Needs Input Badge Click
   document.getElementById('topbar-needs-input-badge')?.addEventListener('click', () => {
     switchView('view-team-room');
     activeAgentFilter = 'needs-you';
@@ -1900,14 +2797,1076 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.setAttribute('aria-pressed', String(active));
     });
     renderAgentRoster();
-    const needsAgent = liveAgents.find(a => getAgentStatus(a) === 'needs-you');
-    if (needsAgent) selectAgent(needsAgent);
+    const needsAgent = liveAgents.find(a => getAgentStatus(a) === 'needs-you') || liveAgents[0];
+    if (needsAgent) {
+      selectAgent(needsAgent);
+      teamChatInput?.focus();
+    }
+  });
+
+  // Topbar Toggle Team Sidebar Button
+  const topbarTeamBtn = document.getElementById('topbar-team-btn');
+  if (topbarTeamBtn) {
+    topbarTeamBtn.addEventListener('click', () => {
+      const rosterPanel = document.querySelector('.agent-roster-panel');
+      const currentActiveView = document.querySelector('.fullscreen-view.active');
+      if (currentActiveView?.id !== 'view-team-room') {
+        switchView('view-team-room');
+        if (rosterPanel) rosterPanel.classList.remove('collapsed');
+      } else if (rosterPanel) {
+        rosterPanel.classList.toggle('collapsed');
+      }
+    });
+  }
+
+  // Topbar Active Turns Modal
+  const topbarSparklePill = document.getElementById('topbar-sparkle-pill');
+  if (topbarSparklePill) {
+    topbarSparklePill.addEventListener('click', () => {
+      const working = liveAgents.filter(a => getAgentStatus(a) === 'working');
+      const needs = liveAgents.filter(a => getAgentStatus(a) === 'needs-you');
+      const turnsCount = working.length || (isPromptInFlight ? 1 : 0);
+
+      const workingListHtml = working.length > 0
+        ? working.map(a => `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#141d2e;border-radius:8px;margin-bottom:6px;">
+              <div>
+                <strong>${escapeHtml(a.name)}</strong> · <span style="color:#94a3b8;font-size:12px;">${escapeHtml(a.role || 'Agent')}</span>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" data-goto-agent="${escapeHtml(a.name)}">Focus Chat</button>
+            </div>
+          `).join('')
+        : `<p style="color:#94a3b8;font-style:italic;margin:8px 0;">No agents currently executing active turns.</p>`;
+
+      openModalDialog({
+        title: 'Active Agent Turns & Concurrency',
+        subtitle: `Currently ${turnsCount} turn(s) active · Concurrency Limit: 4`,
+        contentHtml: `
+          <div style="display:flex;gap:12px;margin-bottom:16px;">
+            <div style="flex:1;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:8px;padding:12px;text-align:center;">
+              <div style="font-size:24px;font-weight:700;color:#38bdf8;">${turnsCount}</div>
+              <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;">Active Turns</div>
+            </div>
+            <div style="flex:1;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:8px;padding:12px;text-align:center;">
+              <div style="font-size:24px;font-weight:700;color:#22c55e;">${liveAgents.length}</div>
+              <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;">Total Agents</div>
+            </div>
+            <div style="flex:1;background:#141d2e;border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:12px;text-align:center;">
+              <div style="font-size:24px;font-weight:700;color:#ef4444;">${needs.length}</div>
+              <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;">Needs Attention</div>
+            </div>
+          </div>
+          <h4 style="margin:12px 0 8px 0;font-size:13px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px;">Active Working Agents</h4>
+          <div id="modal-working-agents-list">
+            ${workingListHtml}
+          </div>
+          <div style="margin-top:20px;text-align:right;">
+            <button type="button" class="btn btn-secondary" id="btn-close-turns-modal">Close</button>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-close-turns-modal')?.addEventListener('click', closeModalDialog);
+          body.querySelectorAll('[data-goto-agent]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const agentName = btn.dataset.gotoAgent;
+              closeModalDialog();
+              switchView('view-team-room');
+              selectAgent(agentName);
+              teamChatInput?.focus();
+            });
+          });
+        }
+      });
+    });
+  }
+
+  // Topbar Help & Keyboard Shortcuts Modal
+  const topbarHelpBtn = document.getElementById('topbar-help-btn');
+  if (topbarHelpBtn) {
+    topbarHelpBtn.addEventListener('click', () => {
+      openModalDialog({
+        title: 'AgentCrew Help & Keyboard Shortcuts',
+        subtitle: 'Productivity guide and keyboard accelerators for high-velocity orchestration',
+        contentHtml: `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+            <div style="background:#141d2e;padding:14px;border-radius:10px;border:1px solid rgba(56,189,248,0.15);">
+              <h4 style="margin:0 0 10px 0;color:#38bdf8;font-size:13px;">Global Shortcuts</h4>
+              <ul style="margin:0;padding-left:18px;font-size:12.5px;color:#e2e8f0;display:flex;flex-direction:column;gap:6px;">
+                <li><kbd>/</kbd> Focus global search palette</li>
+                <li><kbd>Esc</kbd> Close modals, palettes, and dropdowns</li>
+                <li><kbd>Enter</kbd> Send prompt in composer</li>
+                <li><kbd>Shift+Enter</kbd> Insert newline in composer</li>
+                <li><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> Accessible focus navigation</li>
+              </ul>
+            </div>
+            <div style="background:#141d2e;padding:14px;border-radius:10px;border:1px solid rgba(56,189,248,0.15);">
+              <h4 style="margin:0 0 10px 0;color:#38bdf8;font-size:13px;">Views & Cockpit</h4>
+              <ul style="margin:0;padding-left:18px;font-size:12.5px;color:#e2e8f0;display:flex;flex-direction:column;gap:6px;">
+                <li><strong>Cockpit:</strong> Live agent chat feed & real-time PTY terminal</li>
+                <li><strong>Overview:</strong> Velocity charts, project progress, team metrics</li>
+                <li><strong>Board:</strong> 5-column Kanban task board with live assignment</li>
+                <li><strong>Reviews:</strong> Diff inspector, PR status, code review decisions</li>
+                <li><strong>Multi-Worktree:</strong> Git worktrees isolating concurrent agent branches</li>
+              </ul>
+            </div>
+          </div>
+          <div style="text-align:right;margin-top:16px;">
+            <button type="button" class="btn btn-primary" id="btn-close-help-modal">Got it</button>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-close-help-modal')?.addEventListener('click', closeModalDialog);
+        }
+      });
+    });
+  }
+
+  // Topbar Assistant Button
+  const topbarAssistantBtn = document.getElementById('topbar-assistant-btn');
+  if (topbarAssistantBtn) {
+    topbarAssistantBtn.addEventListener('click', () => {
+      switchView('view-team-room');
+      const architect = liveAgents.find(a => (a.role || '').toLowerCase().includes('architect')) || liveAgents[0];
+      if (architect) {
+        selectAgent(architect);
+      }
+      if (teamChatInput) {
+        teamChatInput.focus();
+        if (!teamChatInput.value.includes('@Architect') && architect?.name === 'Architect') {
+          teamChatInput.value = `@Architect ${teamChatInput.value.replace(/^@\w+\s*/, '')}`.trim() + ' ';
+        }
+      }
+      showToast('Switched to Architect assistant in Cockpit', 'info', 2000);
+    });
+  }
+
+  // Topbar User Profile & Operator Preferences
+  const topbarUserProfile = document.getElementById('topbar-user-profile');
+  const topbarUserName = document.getElementById('topbar-user-name');
+
+  const savedOperatorName = localStorage.getItem('agentcrew_operator_name');
+  if (savedOperatorName) {
+    if (topbarUserName) topbarUserName.textContent = savedOperatorName;
+    const settingsOp = document.getElementById('settings-operator-name') || document.querySelector('#view-settings .profile-preview-row h4');
+    if (settingsOp) settingsOp.textContent = savedOperatorName;
+  }
+
+  if (topbarUserProfile) {
+    topbarUserProfile.addEventListener('click', () => {
+      const currentName = topbarUserName?.textContent || 'Human Operator';
+      const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+      const currentAutoscroll = (localStorage.getItem('agentcrew-pref-autoscroll') ?? localStorage.getItem('agentcrew_autoscroll')) !== 'false';
+
+      openModalDialog({
+        title: 'Operator Profile & Preferences',
+        subtitle: 'Configure your operator identity, theme, and workspace preferences',
+        contentHtml: `
+          <form id="preferences-form" style="display:flex;flex-direction:column;gap:16px;">
+            <div class="form-group">
+              <label for="pref-operator-name" style="display:block;margin-bottom:6px;font-size:12.5px;color:#94a3b8;">Operator Display Name</label>
+              <input type="text" id="pref-operator-name" class="form-control" value="${escapeHtml(currentName)}" required style="width:100%;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;font-family:inherit;">
+            </div>
+            <div class="form-group">
+              <label style="display:block;margin-bottom:6px;font-size:12.5px;color:#94a3b8;">Color Theme</label>
+              <div style="display:flex;gap:16px;">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="radio" name="pref-theme" value="dark" ${currentTheme === 'dark' ? 'checked' : ''}> Dark Mode
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="radio" name="pref-theme" value="light" ${currentTheme === 'light' ? 'checked' : ''}> Light Mode
+                </label>
+              </div>
+            </div>
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                <input type="checkbox" id="pref-autoscroll" ${currentAutoscroll ? 'checked' : ''}>
+                <span>Auto-scroll feed to latest messages</span>
+              </label>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:8px;">
+              <button type="button" class="btn btn-secondary" id="btn-cancel-prefs">Cancel</button>
+              <button type="submit" class="btn btn-primary" id="btn-save-prefs">Save Preferences</button>
+            </div>
+          </form>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-cancel-prefs')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#preferences-form')?.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const newName = body.querySelector('#pref-operator-name')?.value.trim() || 'Human Operator';
+            const newTheme = body.querySelector('input[name="pref-theme"]:checked')?.value || 'dark';
+            const newAutoscroll = !!body.querySelector('#pref-autoscroll')?.checked;
+
+            localStorage.setItem('agentcrew_operator_name', newName);
+            localStorage.setItem('agentcrew-pref-autoscroll', String(newAutoscroll));
+            localStorage.setItem('agentcrew_autoscroll', String(newAutoscroll));
+            if (topbarUserName) topbarUserName.textContent = newName;
+            const settingsOp = document.getElementById('settings-operator-name') || document.querySelector('#view-settings .profile-preview-row h4');
+            if (settingsOp) settingsOp.textContent = newName;
+
+            if (newTheme !== currentTheme) {
+              applyTheme(newTheme, true);
+            }
+
+            try {
+              fetch('/api/v1/commands', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  command_type: 'preferences.update',
+                  payload: { operator_name: newName, theme: newTheme, autoscroll: newAutoscroll }
+                })
+              }).catch(() => {});
+            } catch (_) {}
+
+            closeModalDialog();
+            showToast('Operator preferences saved!', 'success');
+          });
+        }
+      });
+    });
+  }
+
+  // --- Global Search Palette Logic ---
+  const topbarSearchInput = document.getElementById('topbar-search-input');
+  const topbarSearchResults = document.getElementById('topbar-search-results');
+  let searchSelectedIdx = -1;
+
+  function renderSearchResults(query) {
+    if (!topbarSearchResults) return;
+    const q = query.trim().toLowerCase();
+    if (!q) {
+      topbarSearchResults.hidden = true;
+      topbarSearchResults.replaceChildren();
+      searchSelectedIdx = -1;
+      return;
+    }
+
+    const views = [
+      { id: 'view-team-room', title: 'Cockpit / Team Room', meta: 'View' },
+      { id: 'view-overview', title: 'Overview Dashboard', meta: 'View' },
+      { id: 'view-kanban', title: 'Board & Tasks', meta: 'View' },
+      { id: 'view-reviews', title: 'Reviews & Pull Requests', meta: 'View' },
+      { id: 'view-repositories', title: 'Repositories', meta: 'View' },
+      { id: 'view-observability', title: 'Metrics & Observability', meta: 'View' },
+      { id: 'view-settings', title: 'Settings', meta: 'View' }
+    ].filter(v => v.title.toLowerCase().includes(q) || v.id.toLowerCase().includes(q));
+
+    const matchedAgents = (Array.isArray(liveAgents) ? liveAgents : []).filter(a =>
+      (a.name || '').toLowerCase().includes(q) ||
+      (a.role || '').toLowerCase().includes(q) ||
+      (a.provider || '').toLowerCase().includes(q) ||
+      (a.model || '').toLowerCase().includes(q)
+    ).slice(0, 5);
+
+    const matchedTasks = (Array.isArray(cachedTasks) ? cachedTasks : []).filter(t =>
+      (t.id || '').toLowerCase().includes(q) ||
+      (t.title || '').toLowerCase().includes(q) ||
+      (t.stage || '').toLowerCase().includes(q) ||
+      (t.assignee || '').toLowerCase().includes(q)
+    ).slice(0, 5);
+
+    const prList = Array.isArray(analyticsData.pullRequests) ? analyticsData.pullRequests : [];
+    const matchedPRs = prList.filter(pr =>
+      (pr.title || '').toLowerCase().includes(q) ||
+      (pr.branch || '').toLowerCase().includes(q) ||
+      (pr.author || '').toLowerCase().includes(q) ||
+      (pr.repository || '').toLowerCase().includes(q)
+    ).slice(0, 5);
+
+    const repoList = Array.isArray(analyticsData.repositories) ? analyticsData.repositories : [];
+    const matchedRepos = repoList.filter(r =>
+      (r.name || '').toLowerCase().includes(q) ||
+      (r.path || '').toLowerCase().includes(q)
+    ).slice(0, 5);
+
+    const totalResults = views.length + matchedAgents.length + matchedTasks.length + matchedPRs.length + matchedRepos.length;
+
+    topbarSearchResults.replaceChildren();
+    searchSelectedIdx = -1;
+
+    if (totalResults === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'search-no-results';
+      empty.textContent = `No results found for "${query}"`;
+      topbarSearchResults.appendChild(empty);
+      topbarSearchResults.hidden = false;
+      return;
+    }
+
+    const appendGroup = (groupTitle, items, makeItem) => {
+      if (items.length === 0) return;
+      const header = document.createElement('div');
+      header.className = 'search-result-group-title';
+      header.textContent = groupTitle;
+      topbarSearchResults.appendChild(header);
+
+      items.forEach(item => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'search-result-item';
+        btn.setAttribute('role', 'option');
+        makeItem(btn, item);
+        topbarSearchResults.appendChild(btn);
+      });
+    };
+
+    appendGroup('Views & Navigation', views, (btn, v) => {
+      btn.dataset.type = 'view';
+      btn.dataset.id = v.id;
+      btn.innerHTML = `<span class="result-title">${escapeHtml(v.title)}</span><span class="result-meta">${escapeHtml(v.meta)}</span>`;
+      btn.addEventListener('click', () => {
+        switchView(v.id);
+        closeSearchPalette();
+      });
+    });
+
+    appendGroup('Agents', matchedAgents, (btn, a) => {
+      btn.dataset.type = 'agent';
+      btn.dataset.id = a.name;
+      btn.innerHTML = `<span class="result-title">🤖 ${escapeHtml(a.name)} · ${escapeHtml(a.role || '')}</span><span class="result-meta">${escapeHtml(a.provider || 'agent')}</span>`;
+      btn.addEventListener('click', () => {
+        switchView('view-team-room');
+        selectAgent(a);
+        teamChatInput?.focus();
+        closeSearchPalette();
+      });
+    });
+
+    appendGroup('Tasks', matchedTasks, (btn, t) => {
+      btn.dataset.type = 'task';
+      btn.dataset.id = t.id;
+      btn.innerHTML = `<span class="result-title">📋 ${escapeHtml(t.id)}: ${escapeHtml(t.title || '')}</span><span class="result-meta">${escapeHtml(t.stage || '')}</span>`;
+      btn.addEventListener('click', () => {
+        switchView('view-kanban');
+        closeSearchPalette();
+      });
+    });
+
+    appendGroup('Pull Requests', matchedPRs, (btn, pr) => {
+      btn.dataset.type = 'pr';
+      btn.dataset.id = String(pr.id || pr.number);
+      btn.innerHTML = `<span class="result-title">🔀 ${escapeHtml(pr.title || 'PR')}</span><span class="result-meta">${escapeHtml(pr.repository || '')}</span>`;
+      btn.addEventListener('click', () => {
+        switchView('view-reviews');
+        selectPR(pr);
+        closeSearchPalette();
+      });
+    });
+
+    appendGroup('Repositories', matchedRepos, (btn, r) => {
+      btn.dataset.type = 'repo';
+      btn.dataset.id = r.name;
+      btn.innerHTML = `<span class="result-title">📁 ${escapeHtml(r.name)}</span><span class="result-meta">${escapeHtml(r.branch || 'trunk')}</span>`;
+      btn.addEventListener('click', () => {
+        switchView('view-repositories');
+        closeSearchPalette();
+      });
+    });
+
+    topbarSearchResults.hidden = false;
+  }
+
+  function closeSearchPalette() {
+    if (!topbarSearchResults) return;
+    topbarSearchResults.hidden = true;
+    if (topbarSearchInput) {
+      topbarSearchInput.value = '';
+      topbarSearchInput.blur();
+    }
+    searchSelectedIdx = -1;
+  }
+
+  if (topbarSearchInput) {
+    topbarSearchInput.addEventListener('input', (e) => {
+      renderSearchResults(e.target.value);
+    });
+
+    topbarSearchInput.addEventListener('focus', () => {
+      if (topbarSearchInput.value.trim()) {
+        renderSearchResults(topbarSearchInput.value);
+      }
+    });
+
+    topbarSearchInput.addEventListener('keydown', (e) => {
+      if (!topbarSearchResults || topbarSearchResults.hidden) return;
+      const items = Array.from(topbarSearchResults.querySelectorAll('.search-result-item'));
+      if (items.length === 0) return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        searchSelectedIdx = (searchSelectedIdx + 1) % items.length;
+        items.forEach((it, idx) => it.classList.toggle('selected', idx === searchSelectedIdx));
+        items[searchSelectedIdx]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        searchSelectedIdx = (searchSelectedIdx - 1 + items.length) % items.length;
+        items.forEach((it, idx) => it.classList.toggle('selected', idx === searchSelectedIdx));
+        items[searchSelectedIdx]?.scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const target = searchSelectedIdx >= 0 ? items[searchSelectedIdx] : items[0];
+        target?.click();
+      }
+    });
+  }
+
+  document.addEventListener('click', (e) => {
+    if (topbarSearchResults && !topbarSearchResults.hidden) {
+      const box = document.querySelector('.topbar-search-box');
+      if (box && !box.contains(e.target)) {
+        topbarSearchResults.hidden = true;
+      }
+    }
+  });
+
+  // Global Keyboard Shortcuts ( / for Search, Esc to Close )
+  document.addEventListener('keydown', (e) => {
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const active = document.activeElement;
+      const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable);
+      if (!isInput) {
+        e.preventDefault();
+        if (topbarSearchInput) {
+          topbarSearchInput.focus();
+          topbarSearchInput.select();
+        }
+      }
+    } else if (e.key === 'Escape') {
+      if (sharedDialogModal && !sharedDialogModal.hidden) {
+        closeModalDialog();
+        return;
+      }
+      if (projectWizardModal && !projectWizardModal.hidden) {
+        closeProjectWizard();
+        return;
+      }
+      if (topbarSearchResults && !topbarSearchResults.hidden) {
+        closeSearchPalette();
+        return;
+      }
+      if (appSidebar && appSidebar.classList.contains('open')) {
+        setMobileDrawer(false);
+        return;
+      }
+      if (selectedPR) {
+        closePRPanel();
+        return;
+      }
+    }
+  });
+
+  // --- Composer Mini-Tools Actions (Phase 2) ---
+  const btnExpandComposer = document.getElementById('btn-expand-composer');
+  const composerContainer = document.getElementById('agentsroom-composer');
+  if (btnExpandComposer && composerContainer) {
+    btnExpandComposer.addEventListener('click', () => {
+      const isExpanded = composerContainer.classList.toggle('composer-expanded');
+      btnExpandComposer.setAttribute('aria-expanded', String(isExpanded));
+      btnExpandComposer.title = isExpanded ? 'Collapse Composer' : 'Expand Composer (Toggle larger editor)';
+    });
+  }
+
+  const btnCodeEditor = document.getElementById('btn-code-editor');
+  if (btnCodeEditor && teamChatInput) {
+    btnCodeEditor.addEventListener('click', () => {
+      const isCodeMode = teamChatInput.classList.toggle('code-mode');
+      btnCodeEditor.classList.toggle('active', isCodeMode);
+      if (isCodeMode && !teamChatInput.value.trim()) {
+        teamChatInput.value = '// Task:\n// Implementation:\n';
+        teamChatInput.focus();
+        teamChatInput.setSelectionRange(teamChatInput.value.length, teamChatInput.value.length);
+      }
+    });
+  }
+
+  const btnChipInsertCode = document.getElementById('btn-chip-insert-code');
+  if (btnChipInsertCode && teamChatInput) {
+    btnChipInsertCode.addEventListener('click', () => {
+      const start = teamChatInput.selectionStart;
+      const end = teamChatInput.selectionEnd;
+      const val = teamChatInput.value;
+      if (start !== end) {
+        const selected = val.substring(start, end);
+        teamChatInput.value = val.substring(0, start) + '```\n' + selected + '\n```' + val.substring(end);
+        teamChatInput.focus();
+        teamChatInput.setSelectionRange(start + 4, start + 4 + selected.length);
+      } else {
+        const codeBlock = '```\n\n```';
+        teamChatInput.value = val.substring(0, start) + codeBlock + val.substring(end);
+        teamChatInput.focus();
+        teamChatInput.setSelectionRange(start + 4, start + 4);
+      }
+    });
+  }
+
+  // + Tools Dialog Chip
+  const btnChipTools = document.getElementById('btn-chip-tools');
+  if (btnChipTools) {
+    btnChipTools.addEventListener('click', () => {
+      const availableTools = [
+        { id: 'bash', name: 'Bash / Shell', desc: 'Execute system commands, test scripts, and build tasks' },
+        { id: 'read_file', name: 'Read File', desc: 'Inspect source code, configuration files, and assets' },
+        { id: 'write_file', name: 'Write File', desc: 'Create or update project source files and patches' },
+        { id: 'git_diff', name: 'Git Diff', desc: 'Inspect staged and unstaged Git tree modifications' },
+        { id: 'test_runner', name: 'Test Runner', desc: 'Run automated node, pytest, or custom test suites' },
+        { id: 'search_code', name: 'Search Code', desc: 'Search symbols, function definitions, and regexes' }
+      ];
+
+      const checkboxesHtml = availableTools.map(t => {
+        const checked = activeComposerAttachments.tools.has(t.id) ? 'checked' : '';
+        return `
+          <label style="display:flex;align-items:flex-start;gap:10px;padding:8px 10px;background:#141d2e;border:1px solid rgba(56,189,248,0.15);border-radius:8px;margin-bottom:8px;cursor:pointer;">
+            <input type="checkbox" name="composer-tool" value="${escapeHtml(t.id)}" ${checked} style="margin-top:3px;">
+            <div>
+              <strong style="color:#e2e8f0;font-size:13px;">${escapeHtml(t.name)}</strong>
+              <div style="font-size:11.5px;color:#94a3b8;">${escapeHtml(t.desc)}</div>
+            </div>
+          </label>
+        `;
+      }).join('');
+
+      openModalDialog({
+        title: 'Attach Tools to Agent Prompt',
+        subtitle: 'Select specialized execution tools to grant or prioritize for this turn',
+        contentHtml: `
+          <div style="max-height:300px;overflow-y:auto;">
+            ${checkboxesHtml}
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-clear-all-tools">Clear All</button>
+            <div style="display:flex;gap:10px;">
+              <button type="button" class="btn btn-secondary" id="btn-cancel-tools">Cancel</button>
+              <button type="button" class="btn btn-primary" id="btn-apply-tools">Apply Tools</button>
+            </div>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-clear-all-tools')?.addEventListener('click', () => {
+            body.querySelectorAll('input[name="composer-tool"]').forEach(cb => cb.checked = false);
+          });
+          body.querySelector('#btn-cancel-tools')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#btn-apply-tools')?.addEventListener('click', () => {
+            activeComposerAttachments.tools.clear();
+            body.querySelectorAll('input[name="composer-tool"]:checked').forEach(cb => {
+              activeComposerAttachments.tools.add(cb.value);
+            });
+            renderComposerAttachments();
+            closeModalDialog();
+            const count = activeComposerAttachments.tools.size;
+            showToast(count > 0 ? `Attached ${count} tool(s) to prompt` : 'Cleared tool attachments', 'info', 2000);
+          });
+        }
+      });
+    });
+  }
+
+  // + Context Dialog Chip
+  const btnChipContext = document.getElementById('btn-chip-context');
+  if (btnChipContext) {
+    btnChipContext.addEventListener('click', async () => {
+      let suggestedFiles = ['package.json', 'README.md', 'src/server/public/app.js', 'src/server/supervisor-server.js'];
+      let suggestedBranches = ['main', 'feat/task-37-multi-project-registry'];
+
+      try {
+        const res = await fetch('/api/v1/context?kind=files');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.files) && data.files.length > 0) {
+            suggestedFiles = data.files.slice(0, 8);
+          }
+        }
+      } catch (_) {}
+
+      try {
+        const res = await fetch('/api/v1/context?kind=branches');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.branches) && data.branches.length > 0) {
+            suggestedBranches = data.branches.slice(0, 4);
+          }
+        }
+      } catch (_) {}
+
+      const filesHtml = suggestedFiles.map(f => {
+        const checked = activeComposerAttachments.context.has(f) ? 'checked' : '';
+        return `
+          <label style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:6px;font-size:12px;margin:3px;cursor:pointer;">
+            <input type="checkbox" name="context-item" value="${escapeHtml(f)}" ${checked}>
+            <span>📄 ${escapeHtml(f)}</span>
+          </label>
+        `;
+      }).join('');
+
+      const branchesHtml = suggestedBranches.map(b => {
+        const branchName = typeof b === 'string' ? b : (b?.name || '');
+        if (!branchName) return '';
+        const val = `branch:${branchName}`;
+        const checked = activeComposerAttachments.context.has(val) ? 'checked' : '';
+        return `
+          <label style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px;background:#141d2e;border:1px solid rgba(56,189,248,0.2);border-radius:6px;font-size:12px;margin:3px;cursor:pointer;">
+            <input type="checkbox" name="context-item" value="${escapeHtml(val)}" ${checked}>
+            <span>🌿 ${escapeHtml(branchName)}</span>
+          </label>
+        `;
+      }).filter(Boolean).join('');
+
+      openModalDialog({
+        title: 'Attach Context to Prompt',
+        subtitle: 'Provide specific repository files, branches, or PR diffs for the agent to analyze',
+        contentHtml: `
+          <div style="margin-bottom:14px;">
+            <label style="display:block;margin-bottom:6px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Custom Path or Resource</label>
+            <div style="display:flex;gap:8px;">
+              <input type="text" id="input-custom-context" placeholder="e.g. src/utils/logger.js or #12" style="flex:1;padding:8px 12px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;font-family:inherit;font-size:13px;">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-add-custom-context">+ Add</button>
+            </div>
+          </div>
+          <div style="margin-bottom:14px;">
+            <label style="display:block;margin-bottom:6px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Suggested Files</label>
+            <div style="display:flex;flex-wrap:wrap;">${filesHtml}</div>
+          </div>
+          <div style="margin-bottom:16px;">
+            <label style="display:block;margin-bottom:6px;font-size:12px;color:#94a3b8;text-transform:uppercase;">Branches & Worktrees</label>
+            <div style="display:flex;flex-wrap:wrap;">${branchesHtml}</div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button type="button" class="btn btn-secondary" id="btn-cancel-context">Cancel</button>
+            <button type="button" class="btn btn-primary" id="btn-apply-context">Apply Context</button>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-cancel-context')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#btn-add-custom-context')?.addEventListener('click', () => {
+            const val = body.querySelector('#input-custom-context')?.value.trim();
+            if (val) {
+              activeComposerAttachments.context.add(val);
+              renderComposerAttachments();
+              const inp = body.querySelector('#input-custom-context');
+              if (inp) inp.value = '';
+              showToast(`Attached ${val}`, 'info', 1500);
+            }
+          });
+          body.querySelector('#btn-apply-context')?.addEventListener('click', () => {
+            body.querySelectorAll('input[name="context-item"]').forEach(cb => {
+              if (cb.checked) {
+                activeComposerAttachments.context.add(cb.value);
+              } else {
+                activeComposerAttachments.context.delete(cb.value);
+              }
+            });
+            renderComposerAttachments();
+            closeModalDialog();
+            const count = activeComposerAttachments.context.size;
+            showToast(count > 0 ? `Attached ${count} context item(s)` : 'Context updated', 'info', 2000);
+          });
+        }
+      });
+    });
+  }
+
+  // 📖 Docs Dialog Chip
+  const btnChipDocs = document.getElementById('btn-chip-docs');
+  if (btnChipDocs) {
+    btnChipDocs.addEventListener('click', () => {
+      const docItems = [
+        { id: 'doc:architecture', title: 'Architecture & System Blueprint', desc: 'Supervisor design, agent state machines, and RPC protocol' },
+        { id: 'doc:api-specs', title: 'REST API & Event Schema', desc: 'Endpoints for /api/v1/projects, room messages, and tasks' },
+        { id: 'doc:coding-standards', title: 'Coding Conventions & Security', desc: 'Async safety, XSS escaping, and test bundle guidelines' },
+        { id: 'doc:worktree-guide', title: 'Multi-Worktree Guide', desc: 'Isolated Git worktrees per agent under .agentcrew/worktrees' }
+      ];
+
+      const docsHtml = docItems.map(d => {
+        const checked = activeComposerAttachments.docs.has(d.id) ? 'checked' : '';
+        return `
+          <label style="display:flex;align-items:flex-start;gap:10px;padding:8px 10px;background:#141d2e;border:1px solid rgba(56,189,248,0.15);border-radius:8px;margin-bottom:8px;cursor:pointer;">
+            <input type="checkbox" name="composer-doc" value="${escapeHtml(d.id)}" ${checked} style="margin-top:3px;">
+            <div>
+              <strong style="color:#e2e8f0;font-size:13px;">${escapeHtml(d.title)}</strong>
+              <div style="font-size:11.5px;color:#94a3b8;">${escapeHtml(d.desc)}</div>
+            </div>
+          </label>
+        `;
+      }).join('');
+
+      openModalDialog({
+        title: 'Attach Documentation & Knowledge',
+        subtitle: 'Include foundational project documentation for the agent to reference',
+        contentHtml: `
+          <div style="max-height:300px;overflow-y:auto;">
+            ${docsHtml}
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+            <button type="button" class="btn btn-secondary" id="btn-cancel-docs">Cancel</button>
+            <button type="button" class="btn btn-primary" id="btn-apply-docs">Apply Docs</button>
+          </div>
+        `,
+        onRender: (body) => {
+          body.querySelector('#btn-cancel-docs')?.addEventListener('click', closeModalDialog);
+          body.querySelector('#btn-apply-docs')?.addEventListener('click', () => {
+            activeComposerAttachments.docs.clear();
+            body.querySelectorAll('input[name="composer-doc"]:checked').forEach(cb => {
+              activeComposerAttachments.docs.add(cb.value);
+            });
+            renderComposerAttachments();
+            closeModalDialog();
+            const count = activeComposerAttachments.docs.size;
+            showToast(count > 0 ? `Attached ${count} doc(s) to prompt` : 'Docs updated', 'info', 2000);
+          });
+        }
+      });
+    });
+  }
+
+  // Voice Input Speech Recognition
+  let speechRecognitionInstance = null;
+  let isVoiceRecording = false;
+
+  const btnVoiceMic = document.getElementById('btn-voice-mic');
+  if (btnVoiceMic && teamChatInput) {
+    btnVoiceMic.addEventListener('click', () => {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        showToast('Voice input is not supported by your browser.', 'warning');
+        return;
+      }
+
+      if (isVoiceRecording) {
+        speechRecognitionInstance?.stop();
+        return;
+      }
+
+      try {
+        speechRecognitionInstance = new SpeechRecognition();
+        speechRecognitionInstance.continuous = true;
+        speechRecognitionInstance.interimResults = false;
+        speechRecognitionInstance.lang = 'en-US';
+
+        speechRecognitionInstance.onstart = () => {
+          isVoiceRecording = true;
+          btnVoiceMic.classList.add('recording');
+          btnVoiceMic.title = 'Recording voice... Click to stop';
+          showToast('Listening... Speak now', 'info', 2000);
+        };
+
+        speechRecognitionInstance.onresult = (event) => {
+          let transcript = '';
+          const startIndex = typeof event.resultIndex === 'number' ? event.resultIndex : 0;
+          for (let i = startIndex; i < event.results.length; i++) {
+            const res = event.results[i];
+            if (res && res[0]) {
+              if (res.isFinal || event.results.length === 1) {
+                const seg = res[0].transcript ? res[0].transcript.trim() : '';
+                if (seg) transcript += (transcript ? ' ' : '') + seg;
+              }
+            }
+          }
+          if (transcript) {
+            const cur = teamChatInput.value;
+            teamChatInput.value = cur ? `${cur} ${transcript}` : transcript;
+            teamChatInput.focus();
+          }
+        };
+
+        speechRecognitionInstance.onerror = (event) => {
+          console.warn('Speech recognition error:', event.error);
+          showToast(`Voice input error: ${event.error}`, 'error');
+          isVoiceRecording = false;
+          btnVoiceMic.classList.remove('recording');
+          btnVoiceMic.title = 'Voice Input';
+        };
+
+        speechRecognitionInstance.onend = () => {
+          isVoiceRecording = false;
+          btnVoiceMic.classList.remove('recording');
+          btnVoiceMic.title = 'Voice Input';
+        };
+
+        speechRecognitionInstance.start();
+      } catch (err) {
+        console.warn('Speech recognition start failed:', err);
+        showToast('Could not start voice recognition: ' + err.message, 'error');
+        isVoiceRecording = false;
+        btnVoiceMic.classList.remove('recording');
+      }
+    });
+  }
+
+  // --- Multi-Step Onboarding Journey & Folder Browser ---
+  let wizardStep = 1;
+  let selectedTeamPreset = 'lean';
+  let browserCurrentDir = '';
+
+  const wizardSubtitle = document.getElementById('wizard-modal-subtitle');
+  const btnWizardBack = document.getElementById('btn-wizard-back');
+  const btnWizardNext = document.getElementById('btn-wizard-next');
+  const btnSubmitWizard = document.getElementById('btn-submit-project-wizard');
+  const btnBrowseFolder = document.getElementById('btn-browse-folder');
+  const pathMissingBanner = document.getElementById('path-missing-banner');
+  const btnCreateMissingFolder = document.getElementById('btn-create-missing-folder');
+  const teamPresetCards = document.querySelectorAll('.team-preset-card');
+
+  const folderBrowserModal = document.getElementById('folder-browser-modal');
+  const btnCloseFolderBrowser = document.getElementById('btn-close-folder-browser');
+  const btnCancelFolderBrowser = document.getElementById('btn-cancel-folder-browser');
+  const browserCurrentPath = document.getElementById('browser-current-path');
+  const browserDirList = document.getElementById('browser-dir-list');
+  const btnBrowserParent = document.getElementById('btn-browser-parent');
+  const browserGitIndicator = document.getElementById('browser-git-indicator');
+  const btnBrowserCreateFolder = document.getElementById('btn-browser-create-folder');
+  const browserNewFolderName = document.getElementById('browser-new-folder-name');
+  const btnSelectCurrentFolder = document.getElementById('btn-select-current-folder');
+
+  const presetDefinitions = {
+    lean: {
+      title: '🚀 Lean Dev & Test Squad',
+      count: '3 Agents',
+      members: [
+        { name: 'Dev-1', role: 'Developer' },
+        { name: 'QA-1', role: 'Tester' },
+        { name: 'Integrator-1', role: 'Integrator' }
+      ]
+    },
+    agile: {
+      title: '⚡ Agile Feature Team',
+      count: '6 Agents',
+      members: [
+        { name: 'Peter', role: 'PO' },
+        { name: 'Arthur', role: 'Architect' },
+        { name: 'Dev-1', role: 'Dev' },
+        { name: 'Dev-2', role: 'Dev' },
+        { name: 'QA-1', role: 'Tester' },
+        { name: 'Integrator-1', role: 'Integrator' }
+      ]
+    },
+    enterprise: {
+      title: '🏛️ Full Enterprise Crew',
+      count: '13 Agents',
+      members: [
+        { name: 'Alice', role: 'BA' },
+        { name: 'Peter', role: 'PO' },
+        { name: 'Arthur', role: 'Architect' },
+        { name: 'Dev-1..4', role: '4 Devs' },
+        { name: 'QA-1..4', role: '4 Testers' },
+        { name: 'Integrator-1..2', role: '2 Integrators' }
+      ]
+    }
+  };
+
+  function setWizardStep(step) {
+    wizardStep = step;
+    [1, 2, 3].forEach(s => {
+      const panel = document.getElementById(`wizard-step-panel-${s}`);
+      const node = document.getElementById(`step-node-${s}`);
+      if (panel) panel.hidden = s !== wizardStep;
+      if (node) {
+        node.classList.toggle('active', s === wizardStep);
+        node.classList.toggle('completed', s < wizardStep);
+      }
+    });
+
+    if (btnWizardBack) btnWizardBack.hidden = wizardStep === 1;
+    if (btnWizardNext) btnWizardNext.hidden = wizardStep === 3;
+    if (btnSubmitWizard) btnSubmitWizard.hidden = wizardStep !== 3;
+
+    if (wizardSubtitle) {
+      if (wizardStep === 1) wizardSubtitle.textContent = 'Step 1 of 3: Repository & Configuration';
+      else if (wizardStep === 2) wizardSubtitle.textContent = 'Step 2 of 3: Team Roster Composition';
+      else if (wizardStep === 3) wizardSubtitle.textContent = 'Step 3 of 3: Review & Launch';
+    }
+
+    if (wizardStep === 3) {
+      const name = document.getElementById('wizard-project-name')?.value?.trim() || 'New Project';
+      const pathVal = document.getElementById('wizard-project-path')?.value?.trim() || '';
+      const zoneVal = document.getElementById('wizard-project-zone')?.value || 'work';
+      const preset = presetDefinitions[selectedTeamPreset] || presetDefinitions.lean;
+
+      const summaryName = document.getElementById('summary-project-name');
+      const summaryZone = document.getElementById('summary-project-zone');
+      const summaryPath = document.getElementById('summary-project-path');
+      const summaryTeamName = document.getElementById('summary-team-name');
+      const summaryTeamCount = document.getElementById('summary-team-count');
+      const summaryRoster = document.getElementById('summary-team-roster');
+
+      if (summaryName) summaryName.textContent = name;
+      if (summaryZone) summaryZone.textContent = zoneVal.toUpperCase();
+      if (summaryPath) summaryPath.textContent = pathVal;
+      if (summaryTeamName) summaryTeamName.textContent = preset.title;
+      if (summaryTeamCount) summaryTeamCount.textContent = preset.count;
+      if (summaryRoster) {
+        summaryRoster.innerHTML = preset.members.map(m => `
+          <span class="preset-member-pill"><strong>${escapeHtml(m.name)}</strong> <span class="preset-member-role">(${escapeHtml(m.role)})</span></span>
+        `).join('');
+      }
+    }
+  }
+
+  // Preset selection click
+  teamPresetCards.forEach(card => {
+    card.addEventListener('click', () => {
+      teamPresetCards.forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      selectedTeamPreset = card.dataset.preset || 'lean';
+    });
+  });
+
+  // Step navigation buttons
+  btnWizardNext?.addEventListener('click', async () => {
+    if (wizardStep === 1) {
+      const name = document.getElementById('wizard-project-name')?.value?.trim();
+      const pathVal = document.getElementById('wizard-project-path')?.value?.trim();
+      if (!name) {
+        document.getElementById('wizard-project-name')?.focus();
+        return;
+      }
+      if (!pathVal) {
+        document.getElementById('wizard-project-path')?.focus();
+        return;
+      }
+      // Check if folder exists
+      try {
+        const checkRes = await fetch(`/api/v1/fs/browse?dir=${encodeURIComponent(pathVal)}`);
+        if (!checkRes.ok && checkRes.status === 404) {
+          pathMissingBanner.hidden = false;
+          return;
+        } else {
+          pathMissingBanner.hidden = true;
+        }
+      } catch (_) {}
+      setWizardStep(2);
+    } else if (wizardStep === 2) {
+      setWizardStep(3);
+    }
+  });
+
+  btnWizardBack?.addEventListener('click', () => {
+    if (wizardStep > 1) setWizardStep(wizardStep - 1);
+  });
+
+  // Inline "Create Folder & Init Git" button
+  btnCreateMissingFolder?.addEventListener('click', async () => {
+    const pathVal = document.getElementById('wizard-project-path')?.value?.trim();
+    if (!pathVal) return;
+    try {
+      const res = await fetch('/api/v1/fs/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: pathVal, init_git: true })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to create folder');
+      pathMissingBanner.hidden = true;
+      log(`Created folder & git repo: ${data.path}`, 'success');
+      setWizardStep(2);
+    } catch (err) {
+      if (wizardErrorMsg) {
+        wizardErrorMsg.textContent = err.message;
+        wizardErrorMsg.hidden = false;
+      }
+    }
+  });
+
+  // Folder Browser Modal Logic
+  async function browseDirectory(dirPath) {
+    if (!browserDirList) return;
+    browserDirList.innerHTML = '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">Loading directories…</div>';
+    try {
+      const res = await fetch(`/api/v1/fs/browse?dir=${encodeURIComponent(dirPath || '')}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to read directory');
+
+      browserCurrentDir = data.current;
+      if (browserCurrentPath) browserCurrentPath.textContent = data.current;
+      if (browserGitIndicator) browserGitIndicator.hidden = !data.is_git_repo;
+
+      if (!data.directories || data.directories.length === 0) {
+        browserDirList.innerHTML = '<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">(No subdirectories)</div>';
+        return;
+      }
+
+      browserDirList.innerHTML = '';
+      data.directories.forEach(d => {
+        const item = document.createElement('div');
+        item.className = 'browser-dir-item';
+        item.innerHTML = `
+          <div class="browser-dir-name">
+            <span>📁</span>
+            <strong>${escapeHtml(d.name)}</strong>
+          </div>
+          ${d.is_git_repo ? '<span style="font-size: 10px; color: #10b981; font-weight: 700;">git</span>' : ''}
+        `;
+        item.addEventListener('click', () => browseDirectory(d.path));
+        browserDirList.appendChild(item);
+      });
+    } catch (err) {
+      browserDirList.innerHTML = `<div style="padding: 12px; color: #ef4444; font-size: 12px;">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  btnBrowseFolder?.addEventListener('click', () => {
+    const curPath = document.getElementById('wizard-project-path')?.value?.trim();
+    if (folderBrowserModal) folderBrowserModal.hidden = false;
+    browseDirectory(curPath || '');
+  });
+
+  function closeFolderBrowser() {
+    if (folderBrowserModal) folderBrowserModal.hidden = true;
+  }
+
+  btnCloseFolderBrowser?.addEventListener('click', closeFolderBrowser);
+  btnCancelFolderBrowser?.addEventListener('click', closeFolderBrowser);
+
+  btnBrowserParent?.addEventListener('click', () => {
+    if (!browserCurrentDir) return;
+    const parts = browserCurrentDir.split('/').filter(Boolean);
+    parts.pop();
+    const parent = '/' + parts.join('/');
+    browseDirectory(parent);
+  });
+
+  btnBrowserCreateFolder?.addEventListener('click', async () => {
+    const name = browserNewFolderName?.value?.trim();
+    if (!name || !browserCurrentDir) return;
+    const newPath = browserCurrentDir.endsWith('/') ? `${browserCurrentDir}${name}` : `${browserCurrentDir}/${name}`;
+    try {
+      const res = await fetch('/api/v1/fs/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: newPath, init_git: true })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to create folder');
+      }
+      if (browserNewFolderName) browserNewFolderName.value = '';
+      await browseDirectory(newPath);
+    } catch (e) {
+      alert(e.message);
+    }
+  });
+
+  btnSelectCurrentFolder?.addEventListener('click', () => {
+    if (browserCurrentDir) {
+      const pathInput = document.getElementById('wizard-project-path');
+      const nameInput = document.getElementById('wizard-project-name');
+      if (pathInput) {
+        pathInput.value = browserCurrentDir;
+        pathMissingBanner.hidden = true;
+      }
+      if (nameInput && !nameInput.value.trim()) {
+        const parts = browserCurrentDir.split('/').filter(Boolean);
+        if (parts.length > 0) nameInput.value = parts[parts.length - 1];
+      }
+    }
+    closeFolderBrowser();
   });
 
   if (btnOpenProjectWizard && projectWizardModal) {
     btnOpenProjectWizard.addEventListener('click', () => {
+      setWizardStep(1);
       projectWizardModal.hidden = false;
       if (wizardErrorMsg) wizardErrorMsg.hidden = true;
+      if (pathMissingBanner) pathMissingBanner.hidden = true;
       document.getElementById('wizard-project-name')?.focus();
     });
   }
@@ -1918,14 +3877,19 @@ document.addEventListener('DOMContentLoaded', () => {
       wizardErrorMsg.hidden = true;
       wizardErrorMsg.textContent = '';
     }
+    if (pathMissingBanner) pathMissingBanner.hidden = true;
+    setWizardStep(1);
   }
 
   if (btnCloseProjectWizard) btnCloseProjectWizard.addEventListener('click', closeProjectWizard);
   if (btnCancelProjectWizard) btnCancelProjectWizard.addEventListener('click', closeProjectWizard);
 
+  let isSubmittingWizard = false;
   if (projectWizardForm) {
     projectWizardForm.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (isSubmittingWizard) return;
+
       const name = document.getElementById('wizard-project-name')?.value?.trim();
       const path = document.getElementById('wizard-project-path')?.value?.trim();
       const zone = document.getElementById('wizard-project-zone')?.value || 'work';
@@ -1934,61 +3898,460 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!name || !path) return;
       if (wizardErrorMsg) wizardErrorMsg.hidden = true;
 
+      isSubmittingWizard = true;
+      if (btnSubmitWizard) btnSubmitWizard.disabled = true;
+
       try {
         const res = await fetch('/api/v1/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, path, mode, zone })
+          body: JSON.stringify({
+            name,
+            path,
+            mode,
+            zone,
+            team_preset: selectedTeamPreset,
+            create_if_missing: true
+          })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Project creation failed');
-        log(`Project registered: ${data.project.name} (${data.project.mode})`, 'success');
+        log(`Project registered with ${selectedTeamPreset} team: ${data.project.name} (${data.project.mode})`, 'success');
+
+        // Automatically activate newly created project
+        try {
+          await fetch(`/api/v1/projects/${encodeURIComponent(data.project.id)}/activate`, { method: 'POST' });
+          currentProjectId = data.project.id;
+        } catch (_) {}
+
         projectWizardForm.reset();
         closeProjectWizard();
+        switchView('view-team-room');
         await loadProjects();
+        await loadWorkspace();
+        await loadAgents();
+        await loadTasks();
+        await loadRealRepositoryData();
       } catch (err) {
         if (wizardErrorMsg) {
           wizardErrorMsg.textContent = err.message;
           wizardErrorMsg.hidden = false;
         }
+      } finally {
+        isSubmittingWizard = false;
+        if (btnSubmitWizard) btnSubmitWizard.disabled = false;
+      }
+    });
+  }
+
+  if (projectWizardModal) {
+    projectWizardModal.addEventListener('click', (e) => {
+      if (e.target === projectWizardModal) {
+        closeProjectWizard();
       }
     });
   }
 
   // Pop-Out Detachable Terminal (TASK-46)
-  if (btnPopoutTerminal) {
-    btnPopoutTerminal.addEventListener('click', async () => {
-      const agentId = selectedAgentName || agentSelect?.value || 'Dev-1';
-      let token = takeoverTokens.get(agentId) || '';
+  const btnPopoutTerminalTop = document.getElementById('btn-popout-terminal-top');
+  let popoutTerminalPollInterval = null;
 
-      if (!token) {
-        try {
-          const res = await fetch('/api/v1/commands', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'takeover', agent_id: agentId })
-          });
-          const result = await res.json();
-          if (res.ok && result.result?.takeover_token) {
-            token = result.result.takeover_token;
-            takeoverTokens.set(agentId, token);
-            persistTakeoverTokens();
-            if (stateBadge) stateBadge.textContent = 'Human Owned';
-            if (btnTakeover) btnTakeover.disabled = true;
-            if (btnRelease) btnRelease.disabled = false;
-            loadAgents();
-          }
-        } catch (_) {}
+  async function openPopoutTerminal() {
+    const agentId = selectedAgentName || agentSelect?.value || 'Dev-1';
+    let token = takeoverTokens.get(agentId) || '';
+
+    if (!token) {
+      try {
+        const res = await fetch('/api/v1/commands', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'takeover', agent_id: agentId })
+        });
+        const result = await res.json();
+        if (res.ok && result.result?.takeover_token) {
+          token = result.result.takeover_token;
+          takeoverTokens.set(agentId, token);
+          persistTakeoverTokens();
+          if (stateBadge) stateBadge.textContent = 'Human Owned';
+          if (btnTakeover) btnTakeover.disabled = true;
+          if (btnRelease) btnRelease.disabled = false;
+          loadAgents();
+        }
+      } catch (_) {}
+    }
+
+    const url = `/terminal?agent=${encodeURIComponent(agentId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+    const popoutWin = window.open(url, `agentcrew_term_${agentId}`, 'width=960,height=600,menubar=no,toolbar=no,location=no,status=no');
+
+    if (!popoutWin) {
+      showToast('Pop-out window was blocked by the browser. Please allow popups.', 'warning');
+      return;
+    }
+
+    // Detach embedded PTY so the popout window does not get a 409 Conflict
+    disconnectPty();
+    if (btnPopoutTerminal) btnPopoutTerminal.disabled = true;
+    if (btnPopoutTerminalTop) btnPopoutTerminalTop.disabled = true;
+    log(`Detached xterm terminal opened for ${agentId}`, 'system');
+
+    if (popoutTerminalPollInterval) clearInterval(popoutTerminalPollInterval);
+    popoutTerminalPollInterval = setInterval(() => {
+      if (popoutWin.closed) {
+        clearInterval(popoutTerminalPollInterval);
+        popoutTerminalPollInterval = null;
+        if (btnPopoutTerminal) btnPopoutTerminal.disabled = false;
+        if (btnPopoutTerminalTop) btnPopoutTerminalTop.disabled = false;
+        log(`Detached terminal for ${agentId} closed. Reconnecting local PTY...`, 'system');
+        const ag = liveAgents.find(a => a.name === selectedAgentName);
+        if (ag && isTakenOver(ag)) {
+          connectPty(ag.name);
+        }
       }
+    }, 1000);
+  }
 
-      // Detach embedded PTY so the popout window does not get a 409 Conflict
-      disconnectPty();
+  if (btnPopoutTerminal) btnPopoutTerminal.addEventListener('click', openPopoutTerminal);
+  if (btnPopoutTerminalTop) btnPopoutTerminalTop.addEventListener('click', openPopoutTerminal);
 
-      const url = `/terminal?agent=${encodeURIComponent(agentId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
-      window.open(url, `agentcrew_term_${agentId}`, 'width=960,height=600,menubar=no,toolbar=no,location=no,status=no');
-      log(`Detached xterm terminal opened for ${agentId}`, 'system');
+  // --- Mobile Search Palette & Stage Navigation (TASK-47) ---
+  const mobileSearchBtn = document.getElementById('mobile-search-btn');
+  if (mobileSearchBtn) {
+    mobileSearchBtn.addEventListener('click', () => {
+      openModalDialog({
+        title: 'Global Search',
+        subtitle: 'Search agents, tasks, pull requests, and views',
+        contentHtml: `
+          <div style="display:flex;flex-direction:column;gap:12px;">
+            <input type="search" id="mobile-search-modal-input" placeholder="Type to search…" style="width:100%;padding:10px 14px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:10px;color:#f8fafc;font-size:15px;box-sizing:border-box;">
+            <div id="mobile-search-modal-results" class="mobile-search-results-list" style="max-height:55dvh;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"></div>
+          </div>
+        `,
+        onRender: (body) => {
+          const input = body.querySelector('#mobile-search-modal-input');
+          const results = body.querySelector('#mobile-search-modal-results');
+          if (input && results) {
+            setTimeout(() => input.focus(), 60);
+            const render = (query) => {
+              results.replaceChildren();
+              const q = query.trim().toLowerCase();
+              if (!q) {
+                const hint = document.createElement('div');
+                hint.className = 'search-no-results';
+                hint.textContent = 'Type to search across views, agents, and tasks…';
+                results.appendChild(hint);
+                return;
+              }
+              const matchedViews = [
+                { id: 'view-overview', title: 'Overview Dashboard', meta: 'View' },
+                { id: 'view-team-room', title: 'Cockpit / Team Room', meta: 'View' },
+                { id: 'view-kanban', title: 'Board & Tasks', meta: 'View' },
+                { id: 'view-reviews', title: 'Reviews & Pull Requests', meta: 'View' },
+                { id: 'view-repositories', title: 'Repositories', meta: 'View' },
+                { id: 'view-observability', title: 'Metrics & Observability', meta: 'View' },
+                { id: 'view-settings', title: 'Settings', meta: 'View' }
+              ].filter(v => v.title.toLowerCase().includes(q) || v.id.toLowerCase().includes(q));
+
+              const matchedAgents = (Array.isArray(liveAgents) ? liveAgents : []).filter(a =>
+                (a.name || '').toLowerCase().includes(q) || (a.role || '').toLowerCase().includes(q)
+              ).slice(0, 5);
+
+              const matchedTasks = (Array.isArray(cachedTasks) ? cachedTasks : []).filter(t =>
+                (t.id || '').toLowerCase().includes(q) || (t.title || '').toLowerCase().includes(q)
+              ).slice(0, 5);
+
+              const cachedPRs = Array.isArray(analyticsData.pullRequests) ? analyticsData.pullRequests : [];
+              const matchedPRs = cachedPRs.filter(pr =>
+                (pr.title || '').toLowerCase().includes(q) ||
+                String(pr.number || '').includes(q) ||
+                (pr.author || '').toLowerCase().includes(q) ||
+                (pr.branch || '').toLowerCase().includes(q)
+              ).slice(0, 5);
+
+              if (!matchedViews.length && !matchedAgents.length && !matchedTasks.length && !matchedPRs.length) {
+                const empty = document.createElement('div');
+                empty.className = 'search-no-results';
+                empty.textContent = 'No matching items found.';
+                results.appendChild(empty);
+                return;
+              }
+
+              matchedViews.forEach(v => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                btn.innerHTML = `<span class="result-title">📌 ${escapeHtml(v.title)}</span><span class="result-meta">${escapeHtml(v.meta)}</span>`;
+                btn.addEventListener('click', () => {
+                  switchView(v.id);
+                  closeModalDialog();
+                });
+                results.appendChild(btn);
+              });
+
+              matchedAgents.forEach(a => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                btn.innerHTML = `<span class="result-title">🤖 ${escapeHtml(a.name)}</span><span class="result-meta">${escapeHtml(a.role || 'Agent')}</span>`;
+                btn.addEventListener('click', () => {
+                  switchView('view-team-room');
+                  selectAgent(a);
+                  closeModalDialog();
+                });
+                results.appendChild(btn);
+              });
+
+              matchedTasks.forEach(t => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                btn.innerHTML = `<span class="result-title">📋 ${escapeHtml(t.id)}: ${escapeHtml(t.title)}</span><span class="result-meta">${escapeHtml(t.stage || 'Task')}</span>`;
+                btn.addEventListener('click', () => {
+                  switchView('view-kanban');
+                  const col = document.querySelector(`.kanban-col[data-stage="${t.stage}"]`);
+                  if (col) col.scrollIntoView({ behavior: 'smooth', inline: 'center' });
+                  closeModalDialog();
+                });
+                results.appendChild(btn);
+              });
+
+              matchedPRs.forEach(pr => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                btn.innerHTML = `<span class="result-title">🔀 #${escapeHtml(pr.number)}: ${escapeHtml(pr.title)}</span><span class="result-meta">${escapeHtml(pr.branch || pr.author || 'PR')}</span>`;
+                btn.addEventListener('click', () => {
+                  switchView('view-reviews');
+                  selectPR(pr.number);
+                  closeModalDialog();
+                });
+                results.appendChild(btn);
+              });
+            };
+            input.addEventListener('input', (e) => render(e.target.value));
+            render('');
+          }
+        }
+      });
     });
   }
+
+  // --- Mobile Workspace & Tools Sheet (TASK-47) ---
+  let mobileToolsBtn = document.getElementById('mobile-tools-btn');
+  if (!mobileToolsBtn) {
+    const appBarActions = document.querySelector('.mobile-app-bar-actions');
+    if (appBarActions) {
+      mobileToolsBtn = document.createElement('button');
+      mobileToolsBtn.className = 'mobile-icon-btn';
+      mobileToolsBtn.id = 'mobile-tools-btn';
+      mobileToolsBtn.type = 'button';
+      mobileToolsBtn.setAttribute('aria-label', 'Open workspace tools');
+      mobileToolsBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`;
+      const searchBtn = document.getElementById('mobile-search-btn');
+      if (searchBtn && searchBtn.nextSibling) {
+        appBarActions.insertBefore(mobileToolsBtn, searchBtn.nextSibling);
+      } else {
+        appBarActions.appendChild(mobileToolsBtn);
+      }
+    }
+  }
+
+  if (mobileToolsBtn) {
+    mobileToolsBtn.addEventListener('click', async () => {
+      let projects = [];
+      try {
+        const res = await fetch('/api/v1/projects');
+        if (res.ok) {
+          const data = await res.json();
+          projects = Array.isArray(data.projects) ? data.projects : [];
+        }
+      } catch (_) {}
+
+      const projectOptionsHtml = projects.map(p =>
+        `<option value="${escapeHtml(p.id)}"${p.is_active ? ' selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.zone || 'work')})</option>`
+      ).join('');
+
+      openModalDialog({
+        title: 'Workspace & Tools',
+        subtitle: 'Switch active project or execute crew actions',
+        contentHtml: `
+          <div class="mobile-tools-sheet" style="display:flex;flex-direction:column;gap:16px;">
+            <div class="mobile-tools-section" style="display:flex;flex-direction:column;gap:8px;">
+              <label for="mobile-tools-project-select" style="font-size:12px;font-weight:700;letter-spacing:0.05em;color:#94a3b8;text-transform:uppercase;">Active Project</label>
+              <div style="display:flex;gap:8px;">
+                <select id="mobile-tools-project-select" class="form-select" style="flex:1;padding:8px 10px;background:#141d2e;border:1px solid rgba(56,189,248,0.3);border-radius:8px;color:#f8fafc;font-size:14px;">
+                  ${projectOptionsHtml || '<option value="">Default Project</option>'}
+                </select>
+                <button type="button" id="btn-mobile-new-project" class="btn btn-sm btn-secondary" style="white-space:nowrap;padding:8px 12px;font-size:13px;">+ New</button>
+              </div>
+            </div>
+
+            <div class="mobile-tools-section" style="display:flex;flex-direction:column;gap:8px;">
+              <span style="font-size:12px;font-weight:700;letter-spacing:0.05em;color:#94a3b8;text-transform:uppercase;">Crew & Cockpit Tools</span>
+              <div class="mobile-tools-grid" style="display:grid;grid-template-columns:repeat(2, 1fr);gap:8px;">
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="git" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  📁 Git Changes
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="signals" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  📶 Signals
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="commands" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  ⌨️ Command Runner
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="state" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  📊 Workspace State
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="ideas" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  💡 Ideas
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="broadcast" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;">
+                  📢 Broadcast to Crew
+                </button>
+                <button type="button" class="btn btn-secondary mobile-tool-btn" data-tool="hire" style="justify-content:flex-start;padding:10px 12px;font-size:13px;border-radius:8px;grid-column:span 2;">
+                  ✨ Hire Specialist
+                </button>
+              </div>
+            </div>
+          </div>
+        `,
+        onRender: (body) => {
+          const select = body.querySelector('#mobile-tools-project-select');
+          if (select) {
+            select.addEventListener('change', async (e) => {
+              const projId = e.target.value;
+              if (!projId) return;
+              try {
+                const actRes = await fetch(`/api/v1/projects/${encodeURIComponent(projId)}/activate`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' }
+                });
+                if (actRes.ok) {
+                  currentProjectId = projId;
+                  const projectSelector = document.getElementById('project-selector');
+                  if (projectSelector) projectSelector.value = projId;
+                  await loadWorkspace();
+                  await loadProjects();
+                  closeModalDialog();
+                }
+              } catch (err) {
+                console.warn('Failed to switch project:', err);
+              }
+            });
+          }
+
+          const btnNew = body.querySelector('#btn-mobile-new-project');
+          if (btnNew) {
+            btnNew.addEventListener('click', () => {
+              closeModalDialog();
+              const wizard = document.getElementById('project-wizard-modal');
+              if (wizard) wizard.hidden = false;
+            });
+          }
+
+          const getActions = () => window.agentCrewActions || window.agentCrewCockpitActions || {};
+
+          body.querySelectorAll('.mobile-tool-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const tool = btn.dataset.tool;
+              const actions = getActions();
+              closeModalDialog();
+              if (tool === 'git') {
+                if (typeof actions.openFilesDrawer === 'function') actions.openFilesDrawer();
+                else document.getElementById('btn-toggle-files-changes')?.click();
+              } else if (tool === 'signals') {
+                if (typeof actions.openSignals === 'function') actions.openSignals();
+              } else if (tool === 'commands') {
+                if (typeof actions.openCommands === 'function') actions.openCommands();
+                else document.getElementById('btn-utility-commands')?.click();
+              } else if (tool === 'state') {
+                if (typeof actions.openState === 'function') actions.openState();
+              } else if (tool === 'ideas') {
+                if (typeof actions.openIdeas === 'function') actions.openIdeas();
+                else document.getElementById('btn-open-ideas')?.click();
+              } else if (tool === 'broadcast') {
+                if (typeof actions.openBroadcast === 'function') actions.openBroadcast();
+                else document.getElementById('btn-open-broadcast')?.click();
+              } else if (tool === 'hire') {
+                document.querySelector('.roster-quick-icons .plus-btn')?.click();
+              }
+            });
+          });
+        }
+      });
+    });
+  }
+
+  // Mobile Kanban Stage Navigator Pills
+  const kanbanStagePills = document.querySelectorAll('.kanban-stage-pill');
+  if (kanbanStagePills.length > 0) {
+    kanbanStagePills.forEach(pill => {
+      pill.addEventListener('click', () => {
+        kanbanStagePills.forEach(p => {
+          p.classList.remove('active');
+          p.setAttribute('aria-selected', 'false');
+        });
+        pill.classList.add('active');
+        pill.setAttribute('aria-selected', 'true');
+        const stage = pill.dataset.stage;
+        const col = document.querySelector(`.kanban-col[data-stage="${stage}"]`);
+        if (col) {
+          col.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+        }
+      });
+    });
+
+    const kanbanWrapper = document.querySelector('.kanban-fullscreen-wrapper');
+    if (kanbanWrapper && 'IntersectionObserver' in window) {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+            const stage = entry.target.dataset.stage;
+            if (stage) {
+              kanbanStagePills.forEach(p => {
+                const isMatch = p.dataset.stage === stage;
+                p.classList.toggle('active', isMatch);
+                p.setAttribute('aria-selected', String(isMatch));
+              });
+            }
+          }
+        });
+      }, { root: kanbanWrapper, threshold: 0.5 });
+      document.querySelectorAll('.kanban-col').forEach(col => observer.observe(col));
+    }
+  }
+
+  // Mobile Visual Viewport Handling (Virtual Keyboard)
+  function setupVirtualKeyboardHandler() {
+    if (!window.visualViewport) return;
+    const updateViewportVars = () => {
+      const vv = window.visualViewport;
+      if (!vv) return;
+      const height = Math.round(vv.height);
+      const offsetTop = Math.round(vv.offsetTop);
+      document.documentElement.style.setProperty('--vvh', `${height}px`);
+      document.documentElement.style.setProperty('--vvo', `${offsetTop}px`);
+
+      const isKeyboardOpen = window.visualViewport.height < window.innerHeight * 0.82;
+      document.body.classList.toggle('virtual-keyboard-open', isKeyboardOpen);
+      if (isKeyboardOpen && document.activeElement?.id === 'team-chat-input') {
+        const feed = document.getElementById('team-room-chat-feed');
+        if (feed) {
+          requestAnimationFrame(() => {
+            feed.scrollTop = feed.scrollHeight;
+          });
+        }
+      }
+      if (terminalInstance && fitAddon && !terminalEmulator?.hidden) {
+        requestAnimationFrame(() => {
+          try { fitAddon.fit(); } catch (_) {}
+        });
+      }
+    };
+
+    window.visualViewport.addEventListener('resize', updateViewportVars);
+    window.visualViewport.addEventListener('scroll', updateViewportVars);
+    updateViewportVars();
+  }
+  setupVirtualKeyboardHandler();
 
   // --- Initial Boot ---
   updateOverview('week');
@@ -2000,11 +4363,19 @@ document.addEventListener('DOMContentLoaded', () => {
     selectPR(analyticsData.pullRequests[0]);
   }
 
+  // Initialize Holographic AI Orb
+  if (typeof AiOrb !== 'undefined' && document.getElementById('ai-orb-canvas')) {
+    aiOrb = new AiOrb('ai-orb-canvas', { interactive: true });
+    window.agentCrewOrb = aiOrb;
+  }
+
   loadProjects();
   loadWorkspace();
   loadAgents();
   loadReadiness();
   loadTasks();
+  loadPopups();
   loadRealRepositoryData();
+  switchView('view-team-room');
   connectSSE();
 });

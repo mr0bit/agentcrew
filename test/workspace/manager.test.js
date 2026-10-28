@@ -176,4 +176,29 @@ test('WorkspaceManager multi-project registry supports registration, isolation, 
   fs.rmSync(projDir2, { recursive: true, force: true });
 });
 
+test('WorkspaceManager supports team presets and create_if_missing', async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentcrew-presets-base-'));
+  const missingProjDir = path.join(os.tmpdir(), 'agentcrew-missing-' + Date.now());
+  const manager = new WorkspaceManager({ baseDir });
+
+  // Register with create_if_missing and lean team preset (3 agents)
+  const proj = await manager.registerProject({
+    path: missingProjDir,
+    name: 'Lean App',
+    team_preset: 'lean',
+    create_if_missing: true
+  });
+
+  assert.ok(fs.existsSync(missingProjDir), 'Must create missing directory');
+  assert.ok(fs.existsSync(path.join(missingProjDir, '.git')), 'Must initialize git repo');
+  assert.equal(proj.name, 'Lean App');
+
+  const agents = await manager.listAgents(proj.id);
+  assert.equal(agents.length, 3, 'Lean preset must seed exactly 3 agents');
+  assert.deepEqual(agents.map(a => a.name).sort(), ['Dev-1', 'Integrator-1', 'QA-1']);
+
+  fs.rmSync(baseDir, { recursive: true, force: true });
+  fs.rmSync(missingProjDir, { recursive: true, force: true });
+});
+
 

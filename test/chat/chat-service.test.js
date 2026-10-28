@@ -402,3 +402,56 @@ test('ChatService preserves Codex thread ID across multi-turn messages (TASK-29)
   assert.equal(codexCalls[1].resumeFrom, 'thread-dev-99', 'Second turn must carry resumeFrom thread_id');
 });
 
+test('ChatService parses real agy stream-json with result.response and step_update.text_delta', async () => {
+  const chunks = [];
+  const service = new ChatService({
+    liveProviders: true,
+    adapters: { agy: new AgyAdapter() },
+    which: (bin) => bin === 'agy',
+    ptyManager: {
+      async executeCommand(_binary, _args, options) {
+        const stream = [
+          '{"event":"init","conversation_id":"conv-real-123","init":{"cwd":"/repo"}}\n',
+          '{"event":"step_update","step_update":{"conversation_id":"conv-real-123","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"I am "}}\n',
+          '{"event":"step_update","step_update":{"conversation_id":"conv-real-123","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Alice"}}\n',
+          '{"event":"result","result":{"conversation_id":"conv-real-123","status":"SUCCESS","response":"I am Alice"}}\n'
+        ];
+        for (const line of stream) {
+          options.onStdout(line);
+        }
+        return { stdout: stream.join(''), stderr: '', code: 0 };
+      },
+    },
+  });
+
+  const reply = await service.generateResponse('Alice', 'Who are you?', {
+    onChunk: (chunk) => chunks.push(chunk),
+  });
+  assert.ok(reply.includes('I am Alice'));
+  assert.equal(chunks.join(''), 'I am Alice');
+  const session = await service.getAgentSession('Alice');
+  assert.equal(session?.sessionId, 'conv-real-123');
+});
+
+test('ChatService filters stdin banners and reports clean error messages', async () => {
+  const service = new ChatService({
+    liveProviders: true,
+    adapters: { codex: new CodexAdapter() },
+    which: (bin) => bin === 'codex',
+    ptyManager: {
+      async executeCommand() {
+        return {
+          stdout: '{"type":"error","message":"{\\"type\\":\\"error\\",\\"error\\":{\\"message\\":\\"The model is not supported\\"}}"}\n',
+          stderr: 'Reading additional input from stdin...\n',
+          code: 1,
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    service.generateResponse('Dev-1', 'Hello', { throwOnProviderError: true }),
+    /The model is not supported/
+  );
+});
+

@@ -120,6 +120,25 @@ Implement plugins.
     ]);
   });
 
+  await t.test('in-flight pull request reads stay pinned to their starting repository', async () => {
+    const service = new RepoDataService({ repoPath: path.join(tmpDir, 'repo-a') });
+    let releaseA;
+    const pendingA = new Promise((resolve) => { releaseA = resolve; });
+    service.execCommand = async (_file, args, options) => {
+      if (args[0] === 'pr' && options.cwd.endsWith('repo-a')) return pendingA;
+      if (args[0] === 'pr') return { error: null, stdout: '[]', stderr: '' };
+      return { error: null, stdout: '', stderr: '' };
+    };
+    const firstRead = service.getPullRequests();
+    service.setRepoRoot(path.join(tmpDir, 'repo-b'));
+    releaseA({ error: null, stdout: JSON.stringify([{ number: 101, title: 'A project', state: 'OPEN' }]), stderr: '' });
+    const [aResults, bResults] = await Promise.all([firstRead, service.getPullRequests()]);
+    assert.equal(aResults[0].title, 'A project');
+    assert.deepEqual(bResults, []);
+    assert.equal(service.cache.has(`${path.join(tmpDir, 'repo-b')}:pullRequests`), true);
+    assert.equal(service.cache.has(`${path.join(tmpDir, 'repo-a')}:pullRequests`), false);
+  });
+
   await t.test('getRepositories returns current repository and worktree status', async () => {
     const service = new RepoDataService({ repoPath: process.cwd() });
     const repos = await service.getRepositories();

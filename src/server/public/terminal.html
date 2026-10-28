@@ -2,7 +2,11 @@
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#060911">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Agent Terminal — AgentCrew</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpeg">
   <link rel="stylesheet" href="/vendor/xterm.css">
@@ -16,20 +20,22 @@
       --text: #f1f5f9;
       --text-muted: #94a3b8;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     body {
       background: var(--bg);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       height: 100vh;
+      height: 100dvh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      touch-action: manipulation;
     }
     .term-header {
       background: var(--card-bg);
       border-bottom: 1px solid var(--border);
-      padding: 8px 16px;
+      padding: calc(8px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -84,6 +90,46 @@
       width: 100%;
       height: 100%;
     }
+    .terminal-mobile-keys {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 6px max(12px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+      background: var(--card-bg);
+      border-top: 1px solid var(--border);
+      scrollbar-width: none;
+      flex-shrink: 0;
+    }
+    .terminal-mobile-keys::-webkit-scrollbar { display: none; }
+    .terminal-mobile-keys button {
+      min-height: 40px;
+      min-width: 44px;
+      padding: 6px 12px;
+      background: rgba(30, 41, 59, 0.85);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 7px;
+      color: var(--text);
+      font-family: "JetBrains Mono", Menlo, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      touch-action: manipulation;
+      transition: background 0.15s ease, transform 0.1s ease;
+    }
+    .terminal-mobile-keys button:active {
+      background: rgba(56, 189, 248, 0.4);
+      transform: scale(0.96);
+    }
+    .terminal-mobile-keys button[aria-pressed="true"] {
+      background: #0284c7;
+      border-color: #38bdf8;
+      color: #fff;
+    }
   </style>
 </head>
 <body>
@@ -93,12 +139,23 @@
       <span class="term-title" id="agent-title">Agent Terminal</span>
     </div>
     <div class="term-status">
-      <span class="status-dot" id="status-dot"></span>
-      <span id="status-label">Connected</span>
+      <span class="status-dot disconnected" id="status-dot"></span>
+      <span id="status-label">Connecting…</span>
     </div>
   </div>
   <div class="term-container">
     <div id="terminal-root" class="term-body"></div>
+  </div>
+  <div id="terminal-mobile-keys" class="terminal-mobile-keys" aria-label="Terminal keys">
+    <button type="button" data-terminal-key="escape">Esc</button>
+    <button type="button" data-terminal-key="tab">Tab</button>
+    <button type="button" data-terminal-key="control" aria-pressed="false">Ctrl</button>
+    <button type="button" data-terminal-key="c" aria-label="Control C">^C</button>
+    <button type="button" data-terminal-key="left" aria-label="Left arrow">←</button>
+    <button type="button" data-terminal-key="down" aria-label="Down arrow">↓</button>
+    <button type="button" data-terminal-key="up" aria-label="Up arrow">↑</button>
+    <button type="button" data-terminal-key="right" aria-label="Right arrow">→</button>
+    <button type="button" data-terminal-key="enter" aria-label="Enter">⏎</button>
   </div>
 
   <script src="/vendor/xterm.js"></script>
@@ -114,6 +171,16 @@
         try {
           const stored = JSON.parse(sessionStorage.getItem('agentcrew.takeoverTokens') || '{}');
           if (stored[agentId]) token = stored[agentId];
+        } catch (_) {}
+      }
+
+      // Strip token from URL so credentials are not exposed in history or referrers
+      if (token) {
+        try {
+          const cleanUrl = new URL(window.location.href);
+          cleanUrl.searchParams.delete('token');
+          cleanUrl.searchParams.delete('takeover_token');
+          window.history.replaceState(null, '', cleanUrl.pathname + cleanUrl.search);
         } catch (_) {}
       }
 
@@ -147,9 +214,14 @@
         try { fitAddon.fit(); } catch (_) {}
       }
 
+      let ws = null;
+
       window.addEventListener('resize', () => {
         if (fitAddon) {
           try { fitAddon.fit(); } catch (_) {}
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
         }
       });
 
@@ -181,11 +253,10 @@
 
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/pty?mode=agent_tui&agent_id=${encodeURIComponent(agentId)}&token=${encodeURIComponent(token)}`;
-      const ws = new WebSocket(wsUrl);
+      ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        statusDot.classList.remove('disconnected');
-        statusLabel.textContent = 'Connected (Live PTY)';
+        statusLabel.textContent = 'Connecting (handshake)...';
         if (fitAddon) fitAddon.fit();
         ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
       };
@@ -215,14 +286,64 @@
 
       ws.onerror = () => {
         statusDot.classList.add('disconnected');
-        statusLabel.textContent = 'Connection Error';
+        statusLabel.textContent = 'Disconnected';
       };
 
-      term.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'input', data }));
+      let ctrlLatched = false;
+      const mobileKeys = document.getElementById('terminal-mobile-keys');
+      function sendTerminalInput(data) {
+        if (!data || ws?.readyState !== WebSocket.OPEN) return;
+        if (ctrlLatched) {
+          if (/^[a-z]$/i.test(data)) data = String.fromCharCode(data.toUpperCase().charCodeAt(0) - 64);
+          ctrlLatched = false;
+          const ctrl = mobileKeys?.querySelector('[data-terminal-key="control"]');
+          if (ctrl) ctrl.setAttribute('aria-pressed', 'false');
         }
+        ws.send(JSON.stringify({ type: 'input', data }));
+      }
+
+      mobileKeys?.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-terminal-key]');
+        if (!button) return;
+        const key = button.dataset.terminalKey;
+        if (key === 'control') {
+          ctrlLatched = !ctrlLatched;
+          button.setAttribute('aria-pressed', String(ctrlLatched));
+          term.focus();
+          return;
+        }
+        const keyMap = {
+          escape: '\x1b',
+          tab: '\t',
+          left: '\x1b[D',
+          right: '\x1b[C',
+          up: '\x1b[A',
+          down: '\x1b[B',
+          enter: '\r',
+          c: '\x03'
+        };
+        ctrlLatched = false;
+        const ctrl = mobileKeys?.querySelector('[data-terminal-key="control"]');
+        if (ctrl) ctrl.setAttribute('aria-pressed', 'false');
+        if (keyMap[key]) sendTerminalInput(keyMap[key]);
+        term.focus();
       });
+
+      if (window.visualViewport) {
+        const updateViewportHeight = () => {
+          document.body.style.height = `${Math.round(window.visualViewport.height)}px`;
+          if (fitAddon) {
+            try { fitAddon.fit(); } catch (_) {}
+          }
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+          }
+        };
+        window.visualViewport.addEventListener('resize', updateViewportHeight);
+        window.visualViewport.addEventListener('scroll', updateViewportHeight);
+      }
+
+      term.onData((data) => sendTerminalInput(data));
     })();
   </script>
 </body>

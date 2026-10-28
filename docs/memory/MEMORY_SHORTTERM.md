@@ -33,6 +33,13 @@ deleting is what this policy exists to prevent.
 
 <!-- Day sections follow. Append today's notes under `## YYYY-MM-DD`. -->
 
+## 2026-10-20
+
+Updated the HTTP API test server fixture to pass `repoPath: tmpDir`, keeping
+`task.create` and `idea.promote` test writes inside the temporary repository.
+Verified the HTTP API and phase-6 functionality suites; checked for generated
+untracked backlog task files.
+
 ## 2026-10-18
 
 Session opened by loading long-term memory, recent short-term memory, and the
@@ -363,6 +370,18 @@ TASK-46 pop-out terminal (`/terminal`) enabling detached floating xterm windows 
 
 ## 2026-10-19
 
+Audited current UI/backend for the Antigravity functionality planning handoff;
+saved `docs/FUNCTIONALITY_PLAN.md` with control mapping, proposed endpoints,
+implementation ownership/order and behavioral release gates. No application changes
+made by this audit; existing dirty UI work preserved. Confirmed seeded demo chat,
+sample task fallbacks, fabricated analytics/iteration evidence, unknown commands
+accepted without execution, undefined parsedUrl in room message GET, unsafe content
+interpolation and incomplete project-context switching. Node 24 baseline: all 103
+tests pass, but current tests do not establish functional completeness. Requested
+`codex exec -m sol-6` with medium effort failed because the model is unsupported
+for the configured ChatGPT account; no independent CLI debate or Antigravity
+agreement claimed. Implementation plan remains proposed, not an accepted ADR.
+
 Redesigning AgentCrew Web UI to match the AgentsRoom Cockpit layout and Dark Sea Blue
 aesthetic from the user's reference screenshot (`/home/inegm/Pictures/agentsroom.png`).
 Implementing top navigation bar with project switcher and needs-input pill, 3-column
@@ -386,9 +405,97 @@ Audited browser screenshot (`/home/inegm/Pictures/sceenshot.png`) and fixed visu
    on project dock buttons.
 5. Set `flex-wrap: nowrap` and `white-space: nowrap` on `.agent-name-line` to keep agent
    identity and role dropdowns neatly aligned on one line.
+6. Harmonized application UI to Option A composition + LIX aesthetic:
+   - Added interactive GPU WebGL holographic AI Orb (`src/server/public/ai-orb.js`)
+     featuring fluid chromatic caustics, magnetic pointer follow, and tap ripple shockwaves.
+   - Dialed active indicators from neon cyan to calm, solid matte cerulean blue (#0284c7)
+     with zero glare, matching the reference inspiration.
+   - Scaled element proportions down and opened spacious negative space across all views.
+   - Retired redundant app-sidebar on desktop, elevating navigation to universal topbar tabs.
+   - Restyled floating prompt composer with recessed dark glass and upward-arrow send button.
 All 103 unit/integration tests pass. Restarted daemon on port 3000.
 
 
+
+
+
+
+## 2026-10-20
+
+Backend hardening and Phase 4/5 API work on the current shared AgentCrew worktree:
+project-scoped jobs/sessions and cancellation, command job process limits, scheduler
+pause isolation, session reset/cutoff handling, roster validation, bounded docs
+reads, and project state endpoints for ideas, snippets, tasks, and diagnostics.
+Added HTTP API regressions. Node 24 server tests pass: 54/54. Existing parallel
+frontend and backend edits were preserved; frontend files were not changed here.
+
+Frontend Phase 3–5 follow-up: updated cockpit Kanban stage extraction to recognize
+`tasks-*` columns alongside `col-*`, registered the complete server SSE event list,
+and added a functional-controls regression for clicking a `.task-item` in
+`#tasks-in_progress`. Node 24 targeted test passes (7/7).
+
+Added `test/server/phase6-full-functionality.test.js`, an acceptance suite for
+disposable Git repositories, working/staged diffs, repository context, named job
+execution and cancellation, roster/scheduler/content/preference commands, project
+isolation, diagnostics, and static assets. Node 24 targeted run passes (6/6).
+Fixed three backend project-switch/task-stage blockers: forced quiesce releases scoped scheduler holds, commands/room posts/PTY upgrades reject during teardown, and legacy backlog/todo stages normalize to planning across fallback, merged tasks, create, and promotion. Added regressions in HTTP API and Phase 6 suites; syntax checks pass. Existing UI and unrelated worktree edits preserved.
+
+Closed the remaining project-switch admission race: command and room POSTs pin the
+entry project before body parsing, recheck after parsing, and contribute to an
+in-flight mutation count until completion. PTY upgrades recheck project identity
+after async agent resolution; project activation rejects while any admitted mutation
+is in flight. Added an HTTP API regression for a project change during body parsing.
+
+Mobile terminal follow-up: restored user zoom in `/terminal`, routed xterm input
+through the mobile Ctrl latch, resized the document to `visualViewport.height`
+on viewport resize/scroll, and added a mobile workspace tools button. Expanded
+`test/ui/mobile-ergonomics.test.js` for these behaviors and for the concurrent
+responsive CSS requirements. Focused test currently awaits the parallel stylesheet
+updates; the terminal and tools-button assertions pass.
+
+## 2026-10-22
+
+Diagnosed and resolved agent provider dispatch failure and Agent Configuration modal bugs:
+- Fixed Codex stderr banner masking: Codex outputs `Reading additional input from stdin...` on piped stdin; ChatService now filters this banner and inspects stdout JSON events for actual error payloads.
+- Added `--skip-git-repo-check` to `CodexAdapter.buildSpawnArgs()` preventing safe.directory errors on virtual/external filesystem mounts.
+- Added support for `agy` JSON stream responses (`event: result -> result.response` and `step_update.text_delta`) in both `AgyAdapter.parseStreamEvent()` and `ChatService`.
+- Fixed Agent Configuration UI/backend sync: `app.js` sets `row.dataset.agentId` and exposes `window.agentCrewSelectedAgent()`; `cockpit-actions.js` uses select dropdowns for primary and backup providers, pre-populating current role/model/provider; `agent.configure` persists atomic primary & backup provider settings; removed false-positive 409 rejection when idle monitoring terminals are connected.
+- Verified end-to-end live conversational turns for Peter via both `agy` and `codex`. 152/152 tests passing green. Server restarted on port 3000.
+
+## 2026-10-25
+
+Started local server daemon (`node bin/wizard.js server 3000`) in background task.
+Tested live HTTP and data routes: `/`, `/terminal`, `/api/v1/workspace`, `/api/v1/agents`,
+`/api/v1/readiness`, `/api/v1/projects`, `/api/v1/tasks`, `/api/v1/pull-requests`,
+`/api/v1/repositories`, `/api/v1/analytics`, `/api/v1/git/status`, and
+`/api/v1/room/messages?channel=team-activity`. All endpoints responded with HTTP 200
+and valid live workspace payloads. All 152 tests green.
+
+## 2026-10-27
+
+Session opened with `docs/memory/MEMORY.md` and `docs/memory/MEMORY_SHORTTERM.md` loaded.
+Verified 152/152 tests passing green on Node v24.22.0. Current branch
+`feat/task-37-multi-project-registry` is ahead of remote by 8 commits. Evaluated Milestone
+m-3 (AgentsRoom Cockpit & Specialist Store) queue: TASK-40 through TASK-55 pending in backlog.
+Unified all commits into consolidated branch `feat/cockpit-functionality-and-mobile-ergonomics`
+and opened GitHub Pull Request #21. Started background supervisor daemon on port 3000.
+
+## 2026-10-28
+
+Addressed human review remarks from testing in an iterative loop:
+1. **Full-width Cockpit Scaling (Remark 1)**: Overrode `.fullscreen-view` 1540px ceiling on `#view-team-room.active` with `max-width: none !important; width: 100% !important;`, expanding the canvas to 1868px on 1920x1080 displays with 0px wasted margin. Defaulted initial load view to Cockpit.
+2. **Directory Browser & Folder Creation (Remark 2)**: Added backend endpoints `GET /api/v1/fs/browse` and `POST /api/v1/fs/mkdir` with git init support. Added modal folder browser with parent traversal and new folder creation, plus inline missing directory detection banner with one-click folder creation.
+3. **Project Dock Icon Spacing (Remark 3)**: Fixed missing `.dock-zone-group` styles in `style.css` with uniform 8px gap between items and 16px between zones. Verified bounding boxes via headless Playwright snapshot loop.
+4. **Guided Team Composition Journey (Remark 4)**: Transformed Onboarding Wizard into a 3-step Journey (Step 1: Project & Folder -> Step 2: Team Roster Selection: Lean 3-agent Squad, Agile 6-agent Feature Team, Full Enterprise 13-agent Crew -> Step 3: Review & Launch). Created `src/workspace/team-presets.js` and wired preset seeding into project SQLite database.
+5. **Delegation & Review Skills**: Installed `codex-delegate`, `agy-delegate`, `delegate-setup`, `debate-review`, and `debate` into `.agents/skills/`. Configured project fleet in `.delegate/config.json`:
+   - `feature`: `codex:gpt-6-luna`
+   - `tests`: `agy:gemini-3.8-flash-medium`
+   - `ui`: `agy:gemini-3.8-flash-medium`
+   - `complex`: `codex:gpt-6.1-sol` (effort: medium)
+   - `review-main`: `agy:gemini-4-argon-medium` (readOnly)
+   - `review-debate`: `codex:gpt-6.1-sol` (effort: medium, readOnly)
+   Verified via `node .agents/skills/debate-review/scripts/review-pr.mjs --check`: both `review-main` (19s) and `review-debate` (90s) healthy and passed.
+155/155 tests passing green. Server daemon restarted and verified with live Playwright snapshots.
 
 
 

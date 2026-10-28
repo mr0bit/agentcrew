@@ -1,0 +1,33 @@
+{
+  "version": "delegate-fleet.v1",
+  "lanes": {
+    "feature": {
+      "implementer": "codex",
+      "model": "gpt-6-luna"
+    },
+    "tests": {
+      "implementer": "agy",
+      "model": "gemini-3.8-flash-medium"
+    },
+    "ui": {
+      "implementer": "agy",
+      "model": "gemini-3.8-flash-medium"
+    },
+    "complex": {
+      "implementer": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "medium"
+    },
+    "review-main": {
+      "implementer": "agy",
+      "model": "gemini-4-argon-medium",
+      "readOnly": true
+    },
+    "review-debate": {
+      "implementer": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "readOnly": true
+    }
+  }
+}

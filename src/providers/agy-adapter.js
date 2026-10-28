@@ -57,7 +57,23 @@ class AgyAdapter {
   parseStreamEvent(rawLine) {
     if (!rawLine || !rawLine.trim()) return null;
     try {
-      return JSON.parse(rawLine.trim());
+      const data = JSON.parse(rawLine.trim());
+      if (data.type === 'message.assistant') {
+        return data;
+      }
+      if (data.event === 'step_update' && data.step_update?.text_delta) {
+        return {
+          type: 'message.assistant',
+          text: data.step_update.text_delta,
+        };
+      }
+      if (data.event === 'result' && data.result?.response) {
+        return {
+          type: 'message.assistant',
+          text: data.result.response,
+        };
+      }
+      return data;
     } catch {
       return { type: 'raw.output', text: rawLine };
     }
