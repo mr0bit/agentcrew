@@ -496,6 +496,7 @@ Addressed human review remarks from testing in an iterative loop:
    - `review-debate`: `codex:gpt-6.1-sol` (effort: medium, readOnly)
    Verified via `node .agents/skills/debate-review/scripts/review-pr.mjs --check`: both `review-main` (19s) and `review-debate` (90s) healthy and passed.
 155/155 tests passing green. Server daemon restarted and verified with live Playwright snapshots.
+PR #21 merged into `main` (`c00f3cf`); local tracking branch synced and clean.
 
 
 
